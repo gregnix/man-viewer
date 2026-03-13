@@ -1,0 +1,14 @@
+.TH Code 1
+.SH NAME
+code \- code example
+
+.SH DESCRIPTION
+Here is some code:
+
+.CS
+proc test {} {
+    puts "Hello"
+}
+.CE
+
+And more text.
