@@ -373,6 +373,13 @@ setupTextTags
 # Dark Mode beim Start anwenden (ohne reload – Datei noch nicht geladen)
 if {$::mv::darkMode} { after idle {applyTheme 0} }
 
+# docirHeadingCallback -- vom docir-renderer für jeden heading-Node aufgerufen
+# Befüllt ::mv::toc direkt beim Rendern (kein nachgelagertes Post-Processing nötig)
+proc docirHeadingCallback {text lvl markName} {
+    if {$lvl > 2} return
+    lappend ::mv::toc [list $text "" $markName]
+}
+
 # Macro handler dispatch table
 array set macroHandlers {
     CS handleCS
@@ -1377,11 +1384,12 @@ proc loadManPage {file} {
             return
         }
         docir::renderer::tk::setLinkCallback [list openManPageLink]
+        docir::renderer::tk::setHeadingCallback [list docirHeadingCallback]
         if {[catch {docir::renderer::tk::render $::mv::textWidget $ir $_renderOpts} err]} {
             statusMsg "Render-Fehler (DocIR): $err" error
             return
         }
-        puts stderr "INFO: Renderer = docir-renderer-tk 0.1"
+
     } else {
         # Fallback: alter nroffrenderer
         nroffrenderer::setLinkCallback [list openManPageLink]
@@ -1389,38 +1397,19 @@ proc loadManPage {file} {
             statusMsg "Render-Fehler: $err" error
             return
         }
-        puts stderr "INFO: Renderer = nroffrenderer 0.1 (Fallback)"
-    }
-    
-    # Update TOC with actual positions using marks (robust method)
-    set tocIdx 0
-    foreach node $ast {
-        set type [dict get $node type]
-        if {$type eq "section" || $type eq "subsection"} {
-            if {$tocIdx < [llength $::mv::toc]} {
-                set tocEntry [lindex $::mv::toc $tocIdx]
-                set markName [lindex $tocEntry 2]
-                # Try to get position from mark (most robust)
-                if {$markName ne "" && [catch {$::mv::textWidget index $markName} markPos] == 0} {
-                    lset ::mv::toc $tocIdx 1 $markPos
-                } else {
-                    # Fallback: search for text (less robust, but works if marks fail)
-                    set content [dict get $node content]
-                    set searchText [extractTextFromInlines $content]
-                    set searchPattern "\n$searchText\n"
-                    set pos [$::mv::textWidget search -exact -forward $searchPattern 1.0]
-                    if {$pos eq ""} {
-                        set searchPattern "$searchText\n"
-                        set pos [$::mv::textWidget search -exact -forward $searchPattern 1.0]
-                    }
-                    if {$pos ne ""} {
-                        lset ::mv::toc $tocIdx 1 $pos
-                    } else {
-                        lset ::mv::toc $tocIdx 1 ""
-                    }
+
+        # Fallback: TOC nachträglich aus AST aufbauen (kein headingCallback)
+        foreach node $ast {
+            set type [dict get $node type]
+            if {$type eq "section" || $type eq "subsection"} {
+                set content [dict get $node content]
+                set searchText [extractTextFromInlines $content]
+                set pos [$::mv::textWidget search -exact -forward "\n$searchText\n" 1.0]
+                if {$pos eq ""} {
+                    set pos [$::mv::textWidget search -exact -forward "$searchText\n" 1.0]
                 }
+                lappend ::mv::toc [list $searchText $pos ""]
             }
-            incr tocIdx
         }
     }
     

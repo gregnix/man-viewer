@@ -27,11 +27,12 @@ namespace eval ast2md {
 #
 proc ast2md::render {ast args} {
     # Parse options
-    set opts(-lang) "tcl"
-    set opts(-tip700) false
+    set opts(-lang)     "tcl"
+    set opts(-tip700)   false
+    set opts(-linkmode) "none"
     foreach {k v} $args {
         if {![info exists opts($k)]} {
-            error "unknown option $k, must be -lang or -tip700"
+            error "unknown option $k, must be -lang, -tip700 or -linkmode"
         }
         set opts($k) $v
     }
@@ -43,11 +44,11 @@ proc ast2md::render {ast args} {
             heading    { lappend lines [_renderHeading $node] }
             section    { lappend lines [_renderSection $node] }
             subsection { lappend lines [_renderSection $node] }
-            paragraph  { lappend lines [_renderParagraph $node] }
+            paragraph  { lappend lines [_renderParagraph $node $opts(-linkmode)] }
             pre        { lappend lines [_renderPre $node $opts(-lang)] }
-            list       { lappend lines [_renderList $node] }
+            list       { lappend lines [_renderList $node $opts(-linkmode)] }
             blank      { lappend lines "" }
-            default    { lappend lines [_renderParagraph $node] }
+            default    { lappend lines [_renderParagraph $node $opts(-linkmode)] }
         }
     }
 
@@ -94,9 +95,9 @@ proc ast2md::_renderSection {node} {
 
 # --- Paragraph ---
 
-proc ast2md::_renderParagraph {node} {
+proc ast2md::_renderParagraph {node {linkmode none}} {
     set content [dict get $node content]
-    set text [_renderInlines $content]
+    set text [_renderInlines $content $linkmode]
     set indent ""
     if {[dict exists $node meta]} {
         set meta [dict get $node meta]
@@ -126,7 +127,7 @@ proc ast2md::_renderPre {node lang} {
 
 # --- List (TP, IP, OP, AP) ---
 
-proc ast2md::_renderList {node} {
+proc ast2md::_renderList {node {linkmode none}} {
     set meta [dict get $node meta]
     set kind [dict get $meta kind]
     set content [dict get $node content]
@@ -175,14 +176,14 @@ proc ast2md::_renderList {node} {
                     lappend lines "**${termText}**"
                 }
                 if {$desc ne ""} {
-                    set descText [_renderInlines $desc]
+                    set descText [_renderInlines $desc $linkmode]
                     lappend lines ": ${descText}"
                 }
                 # Render sub-blocks if any
                 foreach block $blocks {
                     set btype [dict get $block type]
                     if {$btype eq "paragraph"} {
-                        set btext [_renderInlines [dict get $block content]]
+                        set btext [_renderInlines [dict get $block content] $linkmode]
                         lappend lines ": ${btext}"
                     } elseif {$btype eq "pre"} {
                         lappend lines ""
@@ -199,7 +200,7 @@ proc ast2md::_renderList {node} {
                 }
                 set descText ""
                 if {$desc ne ""} {
-                    set descText [_renderInlines $desc]
+                    set descText [_renderInlines $desc $linkmode]
                 }
                 # Check if bullet
                 set isBullet [expr {$termText eq "\u2022" || $termText eq "*" || $termText eq "\\(bu"}]
@@ -215,7 +216,7 @@ proc ast2md::_renderList {node} {
                 foreach block $blocks {
                     set btype [dict get $block type]
                     if {$btype eq "paragraph"} {
-                        set btext [_renderInlines [dict get $block content]]
+                        set btext [_renderInlines [dict get $block content] $linkmode]
                         lappend lines "  ${btext}"
                     }
                 }
@@ -231,12 +232,12 @@ proc ast2md::_renderList {node} {
                         set cls [lindex $parts 2]
                         set termText "**${cmd}** (${db}/${cls})"
                     } else {
-                        set termText [_renderInlines $term]
+                        set termText [_renderInlines $term $linkmode]
                     }
                 }
                 set descText ""
                 if {$desc ne ""} {
-                    set descText [_renderInlines $desc]
+                    set descText [_renderInlines $desc $linkmode]
                 }
                 if {$termText ne ""} {
                     lappend lines "${termText}"
@@ -249,10 +250,10 @@ proc ast2md::_renderList {node} {
             default {
                 # Fallback: render as paragraphs
                 if {$term ne ""} {
-                    lappend lines [_renderInlines $term]
+                    lappend lines [_renderInlines $term $linkmode]
                 }
                 if {$desc ne ""} {
-                    lappend lines [_renderInlines $desc]
+                    lappend lines [_renderInlines $desc $linkmode]
                 }
                 lappend lines ""
             }
@@ -278,7 +279,7 @@ proc ast2md::_hasFormatting {inlines} {
 
 # --- Inline rendering (with Markdown formatting) ---
 
-proc ast2md::_renderInlines {inlines} {
+proc ast2md::_renderInlines {inlines {linkmode none}} {
     if {$inlines eq ""} { return "" }
     set result ""
     foreach inline $inlines {
@@ -291,10 +292,18 @@ proc ast2md::_renderInlines {inlines} {
             set itext [dict get $inline value]
         }
         switch -- $itype {
-            text    { append result $itext }
-            strong  { append result "**${itext}**" }
+            text     { append result $itext }
+            strong   { append result "**${itext}**" }
             emphasis { append result "*${itext}*" }
-            default { append result $itext }
+            link {
+                set name [expr {[dict exists $inline name] ? [dict get $inline name] : $itext}]
+                switch -- $linkmode {
+                    server { append result "\[$itext](/$name)" }
+                    file   { append result "\[$itext](${name}.md)" }
+                    default { append result $itext }
+                }
+            }
+            default  { append result $itext }
         }
     }
     # Clean up double spaces

@@ -1,5 +1,37 @@
 # Changelog
 
+## Version 0.1 -- 2026-03-15 (update 2)
+
+### tools/nroff2md-main.tcl -- Erweiterungen
+
+- **`--linkmode server|file|none`**: SEE ALSO links as `/pagename` (mdserver),
+  `pagename.md` (filesystem), or plain text (default)
+- **Batch: recursive search**: `--batch` finds `.n`/`.3` files recursively in
+  subdirectories (e.g. `tcltkdoc/tcl9.0/doc/` and `tk9.0/doc/` in one pass)
+- **Index generation**: `index.md` created after batch conversion with
+  alphabetical sections (A–Z) and jump links (`[A](#tcl-a) | [B](#tcl-b)`)
+- **Categories**: Tcl Commands / Tk Commands (detected by source path) / C API
+- **Back link**: each generated `.md` starts with `[<< Index](index.md)`
+- **`--no-index`**: skip index generation
+
+### lib/tm/ast2md-0.1.tm
+
+- **`-linkmode` option**: `none` (default), `server`, `file`
+- SEE ALSO `link`-type inlines rendered as Markdown links
+
+### docir-renderer-tk-0.1.tm
+
+- **`setHeadingCallback`**: callback fired for each heading node during render
+- Heading nodes set a Text widget mark for TOC navigation
+
+### man-viewer.tcl
+
+- `docirHeadingCallback` proc: fills `::mv::toc` directly during render
+- TOC post-processing block simplified (fallback renderer only)
+- Debug `puts stderr` for renderer info removed
+
+---
+
 ## Version 0.1 -- 2026-03-15
 
 ### man-viewer.tcl -- Export as Markdown

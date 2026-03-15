@@ -27,8 +27,7 @@ man-viewer/
 │   ├── nroff2md.tcl            # standalone converter (all-in-one, generated)
 │   ├── build-nroff2md.tcl      # build script for nroff2md.tcl
 │   ├── nroff2md-header.tcl     # header source
-│   └── nroff2md-main.tcl       # CLI source
-├── tests/
+│   └── nroff2md-main.tcl       # CLI source├── tests/
 │   ├── run-all-tests.tcl       # test runner
 │   └── *.tcl                   # test suites
 └── doc/                        # documentation
@@ -48,8 +47,14 @@ tclsh tools/nroff2md.tcl dict.n
 # Convert to file
 tclsh tools/nroff2md.tcl dict.n dict.md
 
-# Batch convert all .n and .3 files in a directory
-tclsh tools/nroff2md.tcl --batch /usr/share/man/mann/ output/
+# Batch convert recursively (generates index.md + back links)
+tclsh tools/nroff2md.tcl --batch tcltkdoc/ docs/md/
+
+# With SEE ALSO links for mdserver
+tclsh tools/nroff2md.tcl --batch tcltkdoc/ docs/md/ --linkmode server
+
+# With SEE ALSO links for filesystem
+tclsh tools/nroff2md.tcl --batch tcltkdoc/ docs/md/ --linkmode file
 
 # Read from stdin
 cat dict.n | tclsh tools/nroff2md.tcl -

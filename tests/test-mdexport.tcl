@@ -206,3 +206,31 @@ test "md.tp.plain_text_term_unchanged" {
 
 # ============================================================
 test::runAll
+
+# ============================================================
+# H. Linkmode (SEE ALSO Querverweise)
+# ============================================================
+
+test "md.linkmode.none_plain_text" {
+    set md [render ".TH t n\n.SH \"SEE ALSO\"\narray(n), dict(n)\n"]
+    assert [string match "*array(n)*" $md]                  "array(n) als Text"
+    assert [expr {![string match "*\[array*" $md]}]         "kein Link bei linkmode none"
+}
+
+test "md.linkmode.server" {
+    set md [render ".TH t n\n.SH \"SEE ALSO\"\narray(n), dict(n)\n" -linkmode server]
+    assert [string match "*\[array(n)\](/array)*" $md]      "server: /array Link"
+    assert [string match "*\[dict(n)\](/dict)*" $md]        "server: /dict Link"
+}
+
+test "md.linkmode.file" {
+    set md [render ".TH t n\n.SH \"SEE ALSO\"\narray(n), dict(n)\n" -linkmode file]
+    assert [string match "*\[array(n)\](array.md)*" $md]    "file: array.md Link"
+    assert [string match "*\[dict(n)\](dict.md)*" $md]      "file: dict.md Link"
+}
+
+test "md.linkmode.unknown_falls_back_to_none" {
+    set md [render ".TH t n\n.SH \"SEE ALSO\"\narray(n)\n" -linkmode bogus]
+    assert [string match "*array(n)*" $md]              "bogus linkmode: plain text"
+    assert [expr {![string match "*\[array*" $md]}]    "bogus linkmode: kein Link"
+}

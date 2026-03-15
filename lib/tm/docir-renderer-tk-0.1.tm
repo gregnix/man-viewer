@@ -15,6 +15,18 @@ namespace eval ::docir::renderer::tk {
     variable linkCallback    {}
     variable linkTagCounter  0
     variable currentLinkFg   "#0066cc"
+    variable headingCallback {}
+}
+
+# ============================================================
+# docir::renderer::tk::setHeadingCallback
+#   cmd – proc die als: cmd text level markName aufgerufen wird
+#   Wird beim Rendern jedes heading-Nodes aufgerufen.
+#   Ermöglicht dem Aufrufer TOC-Aufbau und Anchor-Marks.
+# ============================================================
+
+proc docir::renderer::tk::setHeadingCallback {cmd} {
+    set ::docir::renderer::tk::headingCallback $cmd
 }
 
 # ============================================================
@@ -38,6 +50,7 @@ proc docir::renderer::tk::setLinkCallback {cmd} {
 proc docir::renderer::tk::render {textWidget ir {options {}}} {
     variable linkCallback
     variable linkTagCounter
+    variable headingCallback
 
     set fontSize   [expr {[dict exists $options fontSize]   ? [dict get $options fontSize]   : 12}]
     set fontFamily [expr {[dict exists $options fontFamily] ? [dict get $options fontFamily] : "TkDefaultFont"}]
@@ -88,12 +101,24 @@ proc docir::renderer::tk::render {textWidget ir {options {}}} {
                 set lvl [expr {[dict exists $meta level] ? [dict get $meta level] : 1}]
                 set tag "heading$lvl"
                 set startIdx [$textWidget index "end"]
+                # Mark für TOC-Navigation setzen
+                set headText ""
+                foreach inline $content {
+                    if {[dict exists $inline text]} { append headText [dict get $inline text] }
+                }
+                set markName "anchor_[regsub -all {[^a-zA-Z0-9]} $headText _]_[llength [$textWidget mark names]]"
+                $textWidget mark set $markName $startIdx
+                $textWidget mark gravity $markName left
                 docir::renderer::tk::_insertInlines $textWidget $content
                 $textWidget insert end "\n" normal
                 # Tag auf die eingefügte Zeile setzen
                 set endIdx [$textWidget index "end - 1 char"]
                 $textWidget tag add $tag $startIdx $endIdx
                 $textWidget insert end "\n" normal
+                # TOC-Callback aufrufen
+                if {$headingCallback ne ""} {
+                    catch {uplevel #0 $headingCallback [list $headText $lvl $markName]}
+                }
             }
 
             paragraph {

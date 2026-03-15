@@ -3546,11 +3546,12 @@ namespace eval ast2md {
 #
 proc ast2md::render {ast args} {
     # Parse options
-    set opts(-lang) "tcl"
-    set opts(-tip700) false
+    set opts(-lang)     "tcl"
+    set opts(-tip700)   false
+    set opts(-linkmode) "none"
     foreach {k v} $args {
         if {![info exists opts($k)]} {
-            error "unknown option $k, must be -lang or -tip700"
+            error "unknown option $k, must be -lang, -tip700 or -linkmode"
         }
         set opts($k) $v
     }
@@ -3562,11 +3563,11 @@ proc ast2md::render {ast args} {
             heading    { lappend lines [_renderHeading $node] }
             section    { lappend lines [_renderSection $node] }
             subsection { lappend lines [_renderSection $node] }
-            paragraph  { lappend lines [_renderParagraph $node] }
+            paragraph  { lappend lines [_renderParagraph $node $opts(-linkmode)] }
             pre        { lappend lines [_renderPre $node $opts(-lang)] }
-            list       { lappend lines [_renderList $node] }
+            list       { lappend lines [_renderList $node $opts(-linkmode)] }
             blank      { lappend lines "" }
-            default    { lappend lines [_renderParagraph $node] }
+            default    { lappend lines [_renderParagraph $node $opts(-linkmode)] }
         }
     }
 
@@ -3613,9 +3614,9 @@ proc ast2md::_renderSection {node} {
 
 # --- Paragraph ---
 
-proc ast2md::_renderParagraph {node} {
+proc ast2md::_renderParagraph {node {linkmode none}} {
     set content [dict get $node content]
-    set text [_renderInlines $content]
+    set text [_renderInlines $content $linkmode]
     set indent ""
     if {[dict exists $node meta]} {
         set meta [dict get $node meta]
@@ -3645,7 +3646,7 @@ proc ast2md::_renderPre {node lang} {
 
 # --- List (TP, IP, OP, AP) ---
 
-proc ast2md::_renderList {node} {
+proc ast2md::_renderList {node {linkmode none}} {
     set meta [dict get $node meta]
     set kind [dict get $meta kind]
     set content [dict get $node content]
@@ -3694,14 +3695,14 @@ proc ast2md::_renderList {node} {
                     lappend lines "**${termText}**"
                 }
                 if {$desc ne ""} {
-                    set descText [_renderInlines $desc]
+                    set descText [_renderInlines $desc $linkmode]
                     lappend lines ": ${descText}"
                 }
                 # Render sub-blocks if any
                 foreach block $blocks {
                     set btype [dict get $block type]
                     if {$btype eq "paragraph"} {
-                        set btext [_renderInlines [dict get $block content]]
+                        set btext [_renderInlines [dict get $block content] $linkmode]
                         lappend lines ": ${btext}"
                     } elseif {$btype eq "pre"} {
                         lappend lines ""
@@ -3718,7 +3719,7 @@ proc ast2md::_renderList {node} {
                 }
                 set descText ""
                 if {$desc ne ""} {
-                    set descText [_renderInlines $desc]
+                    set descText [_renderInlines $desc $linkmode]
                 }
                 # Check if bullet
                 set isBullet [expr {$termText eq "\u2022" || $termText eq "*" || $termText eq "\\(bu"}]
@@ -3734,7 +3735,7 @@ proc ast2md::_renderList {node} {
                 foreach block $blocks {
                     set btype [dict get $block type]
                     if {$btype eq "paragraph"} {
-                        set btext [_renderInlines [dict get $block content]]
+                        set btext [_renderInlines [dict get $block content] $linkmode]
                         lappend lines "  ${btext}"
                     }
                 }
@@ -3750,12 +3751,12 @@ proc ast2md::_renderList {node} {
                         set cls [lindex $parts 2]
                         set termText "**${cmd}** (${db}/${cls})"
                     } else {
-                        set termText [_renderInlines $term]
+                        set termText [_renderInlines $term $linkmode]
                     }
                 }
                 set descText ""
                 if {$desc ne ""} {
-                    set descText [_renderInlines $desc]
+                    set descText [_renderInlines $desc $linkmode]
                 }
                 if {$termText ne ""} {
                     lappend lines "${termText}"
@@ -3768,10 +3769,10 @@ proc ast2md::_renderList {node} {
             default {
                 # Fallback: render as paragraphs
                 if {$term ne ""} {
-                    lappend lines [_renderInlines $term]
+                    lappend lines [_renderInlines $term $linkmode]
                 }
                 if {$desc ne ""} {
-                    lappend lines [_renderInlines $desc]
+                    lappend lines [_renderInlines $desc $linkmode]
                 }
                 lappend lines ""
             }
@@ -3797,7 +3798,7 @@ proc ast2md::_hasFormatting {inlines} {
 
 # --- Inline rendering (with Markdown formatting) ---
 
-proc ast2md::_renderInlines {inlines} {
+proc ast2md::_renderInlines {inlines {linkmode none}} {
     if {$inlines eq ""} { return "" }
     set result ""
     foreach inline $inlines {
@@ -3810,10 +3811,18 @@ proc ast2md::_renderInlines {inlines} {
             set itext [dict get $inline value]
         }
         switch -- $itype {
-            text    { append result $itext }
-            strong  { append result "**${itext}**" }
+            text     { append result $itext }
+            strong   { append result "**${itext}**" }
             emphasis { append result "*${itext}*" }
-            default { append result $itext }
+            link {
+                set name [expr {[dict exists $inline name] ? [dict get $inline name] : $itext}]
+                switch -- $linkmode {
+                    server { append result "\[$itext](/$name)" }
+                    file   { append result "\[$itext](${name}.md)" }
+                    default { append result $itext }
+                }
+            }
+            default  { append result $itext }
         }
     }
     # Clean up double spaces
@@ -3846,26 +3855,26 @@ proc usage {} {
     puts "Usage: nroff2md.tcl \[input.n\] \[output.md\] \[options\]"
     puts ""
     puts "Options:"
-    puts "  -lang LANG       Code block language (default: tcl)"
-    puts "  --batch DIR OUT  Convert all .n/.3 files in DIR to OUT/"
-    puts "  --help           Show this help"
+    puts "  -lang LANG           Code block language (default: tcl)"
+    puts "  --linkmode MODE      Link mode: none, server, file"
+    puts "  --batch DIR OUT      Convert all .n/.3 files in DIR to OUT/"
+    puts "  --no-index           Skip index.md generation in batch mode"
+    puts "  --help               Show this help"
     puts ""
-    puts "Examples:"
-    puts "  tclsh nroff2md.tcl dict.n                    # stdout"
-    puts "  tclsh nroff2md.tcl dict.n dict.md            # to file"
-    puts "  tclsh nroff2md.tcl canvas.n -lang tcl        # language"
-    puts "  tclsh nroff2md.tcl --batch man/n/ docs/md/   # batch"
-    puts "  cat dict.n | tclsh nroff2md.tcl -            # stdin"
+    puts "Link modes:"
+    puts "  none     SEE ALSO as plain text (default)"
+    puts "  server   SEE ALSO as /pagename  (for mdserver)"
+    puts "  file     SEE ALSO as pagename.md (relative file links)"
 }
 
-proc convertFile {inputFile outputFile lang} {
+proc convertFile {inputFile outputFile lang linkmode {indexLink ""}} {
     if {$inputFile eq "-"} {
         set nroff [read stdin]
         set sourceFile ""
     } else {
         if {![file exists $inputFile]} {
             puts stderr "Error: File not found: $inputFile"
-            return 0
+            return {0 {}}
         }
         set fh [open $inputFile r]
         fconfigure $fh -encoding utf-8
@@ -3876,10 +3885,22 @@ proc convertFile {inputFile outputFile lang} {
 
     if {[catch {
         set ast [nroffparser::parse $nroff $sourceFile]
-        set md  [ast2md::render $ast -lang $lang]
+        set md  [ast2md::render $ast -lang $lang -linkmode $linkmode]
     } err]} {
         puts stderr "Error converting $inputFile: $err"
-        return 0
+        return {0 {}}
+    }
+
+    # Metadaten aus dem TH-Node (level=0 heading)
+    set meta {}
+    foreach node $ast {
+        if {[dict get $node type] eq "heading"} {
+            set m [dict get $node meta]
+            if {[dict exists $m level] && [dict get $m level] == 0} {
+                set meta $m
+                break
+            }
+        }
     }
 
     if {$outputFile eq ""} {
@@ -3888,46 +3909,176 @@ proc convertFile {inputFile outputFile lang} {
         file mkdir [file dirname $outputFile]
         set fh [open $outputFile w]
         fconfigure $fh -encoding utf-8
+        if {$indexLink ne ""} {
+            puts $fh "\[$indexLink\](index.md)\n"
+        }
         puts -nonewline $fh $md
         close $fh
         puts stderr "Written: $outputFile"
     }
-    return 1
+    return [list 1 $meta]
 }
 
-proc batchConvert {inputDir outputDir lang} {
+proc generateIndex {entries outputDir linkmode} {
+    # Gruppieren: tcl_n = Tcl Commands, tk_n = Tk Commands, c = C API
+    array set groups {}
+    foreach e $entries {
+        set sec     [dict get $e section]
+        set srcpath [expr {[dict exists $e srcpath] ? [dict get $e srcpath] : ""}]
+        # Pfad-Erkennung: tk9 oder /tk/ im Pfad → Tk
+        set isTk [expr {[string match "*tk9*" $srcpath] || [string match "*/tk/*" $srcpath]}]
+        if {[string match "3*" $sec]} {
+            set grp c
+        } elseif {[string match "n*" $sec] || $sec eq "n"} {
+            set grp [expr {$isTk ? "tk_n" : "tcl_n"}]
+        } else {
+            # Sondersections (print, sysnotify, systray): nach Pfad einordnen
+            set grp [expr {$isTk ? "tk_n" : "tcl_n"}]
+        }
+        lappend groups($grp) $e
+    }
+
+    set lines {}
+    lappend lines "# Tcl/Tk Manual Pages"
+    lappend lines ""
+    set total [llength $entries]
+    lappend lines "Total: $total pages."
+    lappend lines ""
+
+    set sortCmd {apply {{a b} {
+        string compare [string tolower [dict get $a name]] \
+                       [string tolower [dict get $b name]]
+    }}}
+
+    # Hilfsproc: eine Kategorie alphabetisch mit Sprungmarken ausgeben
+    proc _renderCategory {lines_var entries_sorted title} {
+        upvar $lines_var lines
+
+        lappend lines "## $title"
+        lappend lines ""
+
+        # Alle vorhandenen Anfangsbuchstaben sammeln
+        set letters {}
+        foreach e $entries_sorted {
+            set first [string toupper [string index [dict get $e name] 0]]
+            if {[lsearch $letters $first] < 0} {
+                lappend letters $first
+            }
+        }
+
+        # Präfix für eindeutige Anchor-IDs (tcl-a, tk-a, c-a)
+        set pfx [string trimright [string tolower [string map {" " "-"} [string range $title 0 2]]] "-"]
+
+        # Sprungmarken-Zeile: [A](#tcl-a) | [B](#tcl-b) ...
+        set jumpParts {}
+        foreach l $letters {
+            lappend jumpParts "\[${l}\](#${pfx}-[string tolower $l])"
+        }
+        lappend lines [join $jumpParts " | "]
+        lappend lines ""
+
+        # Einträge nach Buchstaben gruppiert
+        set currentLetter ""
+        foreach e $entries_sorted {
+            set name     [dict get $e name]
+            set filename [dict get $e filename]
+            set section  [dict get $e section]
+            set first    [string toupper [string index $name 0]]
+            if {$first ne $currentLetter} {
+                if {$currentLetter ne ""} { lappend lines "" }
+                lappend lines "### ${pfx}-[string tolower $first]"
+                lappend lines ""
+                set currentLetter $first
+            }
+            lappend lines "- \[${name}(${section})\]($filename)"
+        }
+        lappend lines ""
+    }
+
+    foreach {grp title} {tcl_n "Tcl Commands" tk_n "Tk Commands" c "C API"} {
+        if {![info exists groups($grp)]} continue
+        set sorted [lsort -command $sortCmd $groups($grp)]
+        _renderCategory lines $sorted $title
+    }
+
+    set indexFile [file join $outputDir index.md]
+    set fh [open $indexFile w]
+    fconfigure $fh -encoding utf-8
+    puts -nonewline $fh [join $lines "\n"]
+    close $fh
+    puts stderr "Index:   $indexFile ([llength $entries] entries)"
+}
+
+# findNroffFiles -- findet .n und .3 Dateien rekursiv
+proc findNroffFiles {dir} {
     set files {}
     foreach pattern {*.n *.3} {
-        lappend files {*}[glob -nocomplain -directory $inputDir $pattern]
+        lappend files {*}[glob -nocomplain -directory $dir $pattern]
     }
+    foreach subdir [glob -nocomplain -directory $dir -type d *] {
+        lappend files {*}[findNroffFiles $subdir]
+    }
+    return $files
+}
+
+proc batchConvert {inputDir outputDir lang linkmode noIndex} {
+    set files [findNroffFiles $inputDir]
     if {[llength $files] == 0} {
-        puts stderr "No .n or .3 files found in $inputDir"
+        puts stderr "No .n or .3 files found in $inputDir (recursive)"
         return
     }
     file mkdir $outputDir
+
     set ok 0; set fail 0
+    set indexEntries {}
+
     foreach f [lsort $files] {
         set name    [file rootname [file tail $f]]
         set outFile [file join $outputDir ${name}.md]
-        if {[convertFile $f $outFile $lang]} { incr ok } else { incr fail }
+        set result  [convertFile $f $outFile $lang $linkmode [expr {$noIndex ? "" : "<< Index"}]]
+
+        if {[lindex $result 0]} {
+            incr ok
+            if {!$noIndex} {
+                set meta [lindex $result 1]
+                set pageName    [expr {[dict exists $meta name]    ? [dict get $meta name]    : $name}]
+                set pageSection [expr {[dict exists $meta section] ? [dict get $meta section] : "n"}]
+                set linkFile    [expr {$linkmode eq "server" ? "/$name" : "${name}.md"}]
+                lappend indexEntries [dict create \
+                    name     $pageName \
+                    section  $pageSection \
+                    filename $linkFile \
+                    srcpath  $f]
+            }
+        } else {
+            incr fail
+        }
     }
+
     puts stderr "Converted: $ok  Failed: $fail  Total: [expr {$ok + $fail}]"
+    if {!$noIndex && [llength $indexEntries] > 0} {
+        generateIndex $indexEntries $outputDir $linkmode
+    }
 }
 
 # Argument-Verarbeitung
 set inputFile  ""
 set outputFile ""
 set lang       "tcl"
+set linkmode   "none"
 set batch      0
 set batchIn    ""
 set batchOut   ""
+set noIndex    0
 
 set i 0
 while {$i < [llength $argv]} {
     set arg [lindex $argv $i]
     switch -- $arg {
-        --help  { usage; exit 0 }
-        -lang   { incr i; set lang [lindex $argv $i] }
+        --help      { usage; exit 0 }
+        -lang       { incr i; set lang     [lindex $argv $i] }
+        --linkmode  { incr i; set linkmode [lindex $argv $i] }
+        --no-index  { set noIndex 1 }
         --batch {
             set batch 1
             incr i; set batchIn  [lindex $argv $i]
@@ -3942,9 +4093,9 @@ while {$i < [llength $argv]} {
 }
 
 if {$batch} {
-    batchConvert $batchIn $batchOut $lang
+    batchConvert $batchIn $batchOut $lang $linkmode $noIndex
 } elseif {$inputFile ne ""} {
-    convertFile $inputFile $outputFile $lang
+    convertFile $inputFile $outputFile $lang $linkmode
 } else {
-    convertFile "-" "" $lang
+    convertFile "-" "" $lang $linkmode
 }
