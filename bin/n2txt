@@ -1,0 +1,439 @@
+#!/usr/bin/env tclsh
+# n2txt - Convert nroff man pages to plain text
+# Useful for debugging and testing the parser
+#
+# Usage:
+#   n2txt input.n [output.txt] [options]
+#
+# Options:
+#   --ast          Output AST instead of rendered text
+#   --warnings     Show parser warnings
+#   --debug        Enable debug output
+#   --help         Show this help message
+
+package require Tcl 8.6-
+
+# Get script directory - robust against symlinks and relative invocation
+set scriptDir [file dirname [file normalize [info script]]]
+# Project root is one level above bin/
+set projectRoot [file dirname $scriptDir]
+set libDir [file join $projectRoot lib tm]
+
+# Load debug module first (if available)
+if {[file exists [file join $libDir debug-0.2.tm]]} {
+    if {[catch {source [file join $libDir debug-0.2.tm]} err]} {
+        # Debug module failed to load, but continue
+        puts stderr "Warning: Could not load debug module: $err"
+    }
+}
+
+# Load parser and renderer modules
+if {[catch {source [file join $libDir nroffparser-0.2.tm]} err]} {
+    puts stderr "Error loading nroffparser: $err"
+    exit 1
+}
+
+# Simple text renderer (no Tk dependency)
+namespace eval n2txt {
+    variable options {
+        ast 0
+        warnings 0
+        debug 0
+    }
+}
+
+proc n2txt::renderText {ast} {
+    set result ""
+    
+    foreach node $ast {
+        set type [dict get $node type]
+        
+        switch $type {
+            heading {
+                set content [dict get $node content]
+                set meta [dict get $node meta]
+                append result "$content\n"
+                if {[dict exists $meta section]} {
+                    append result "Section [dict get $meta section]\n"
+                }
+                append result "\n"
+            }
+            section {
+                set content [dict get $node content]
+                append result "$content\n"
+                append result [string repeat "=" [string length $content]] "\n\n"
+            }
+            subsection {
+                set content [dict get $node content]
+                append result "$content\n"
+                append result [string repeat "-" [string length $content]] "\n\n"
+            }
+            paragraph {
+                set content [dict get $node content]
+                set text [n2txt::extractText $content]
+                if {$text ne ""} {
+                    append result "$text\n\n"
+                }
+            }
+            list {
+                set items [dict get $node content]
+                foreach item $items {
+                    set term [dict get $item term]
+                    set desc [dict get $item desc]
+                    set termText [n2txt::extractText $term]
+                    set descText [n2txt::extractText $desc]
+                    
+                    if {$termText ne ""} {
+                        append result "  $termText\n"
+                    }
+                    if {$descText ne ""} {
+                        # Indent description
+                        set lines [split $descText "\n"]
+                        foreach line $lines {
+                            if {$line ne ""} {
+                                append result "    $line\n"
+                            }
+                        }
+                    }
+                    append result "\n"
+                }
+            }
+            pre {
+                set content [dict get $node content]
+                append result "$content\n\n"
+            }
+            blank {
+                set meta [dict get $node meta]
+                set lines 1
+                if {[dict exists $meta lines]} {
+                    set lines [dict get $meta lines]
+                }
+                for {set i 0} {$i < $lines} {incr i} {
+                    append result "\n"
+                }
+            }
+            default {
+                # Unknown node type - try to extract text
+                if {[dict exists $node content]} {
+                    set content [dict get $node content]
+                    set text [n2txt::extractText $content]
+                    if {$text ne ""} {
+                        append result "$text\n\n"
+                    }
+                }
+            }
+        }
+    }
+    
+    return $result
+}
+
+proc n2txt::renderMarkdown {ast} {
+    set result ""
+
+    foreach node $ast {
+        set type [dict get $node type]
+
+        switch $type {
+            heading {
+                set content [dict get $node content]
+                append result "# $content\n\n"
+            }
+            section {
+                set content [dict get $node content]
+                append result "## $content\n\n"
+            }
+            subsection {
+                set content [dict get $node content]
+                append result "### $content\n\n"
+            }
+            paragraph {
+                set content [dict get $node content]
+                set text [n2txt::extractTextMd $content]
+                if {$text ne ""} {
+                    append result "$text\n\n"
+                }
+            }
+            list {
+                set items [dict get $node content]
+                foreach item $items {
+                    set term [dict get $item term]
+                    set desc [dict get $item desc]
+                    set termText [n2txt::extractTextMd $term]
+                    set descText [n2txt::extractTextMd $desc]
+                    if {$termText ne ""} {
+                        append result "**$termText**\n"
+                    }
+                    if {$descText ne ""} {
+                        append result ": $descText\n"
+                    }
+                    append result "\n"
+                }
+            }
+            pre {
+                set content [dict get $node content]
+                append result "```\n$content\n```\n\n"
+            }
+            blank {
+                append result "\n"
+            }
+            default {
+                if {[dict exists $node content]} {
+                    set text [n2txt::extractTextMd [dict get $node content]]
+                    if {$text ne ""} {
+                        append result "$text\n\n"
+                    }
+                }
+            }
+        }
+    }
+
+    return $result
+}
+
+# extractTextMd - extract text with basic Markdown formatting (bold/italic)
+proc n2txt::extractTextMd {content} {
+    if {[string is list $content] && [llength $content] > 0} {
+        set result ""
+        foreach inline $content {
+            if {![dict exists $inline type]} continue
+            set itype [dict get $inline type]
+            set itext [expr {[dict exists $inline text] ? [dict get $inline text] : ""}]
+            switch $itype {
+                strong    { append result "**$itext**" }
+                emphasis  { append result "_${itext}_" }
+                underline { append result "_${itext}_" }
+                default   { append result $itext }
+            }
+        }
+        return $result
+    }
+    return $content
+}
+
+proc n2txt::extractText {content} {
+    # Extract plain text from inline structures
+    if {[string is list $content]} {
+        set result ""
+        foreach inline $content {
+            if {[dict exists $inline text]} {
+                append result [dict get $inline text]
+            } elseif {[dict exists $inline type]} {
+                set type [dict get $inline type]
+                if {$type eq "text" && [dict exists $inline text]} {
+                    append result [dict get $inline text]
+                } elseif {$type eq "strong" && [dict exists $inline text]} {
+                    append result [dict get $inline text]
+                } elseif {$type eq "emphasis" && [dict exists $inline text]} {
+                    append result [dict get $inline text]
+                }
+            }
+        }
+        return $result
+    } else {
+        # Plain string
+        return $content
+    }
+}
+
+proc n2txt::printAST {ast {indent 0}} {
+    set result ""
+    set prefix [string repeat "  " $indent]
+    
+    foreach node $ast {
+        set type [dict get $node type]
+        append result "$prefix{type: $type\n"
+        
+        if {[dict exists $node content]} {
+            set content [dict get $node content]
+            if {[string is list $content] && [llength $content] > 0} {
+                set first [lindex $content 0]
+                if {[dict exists $first type]} {
+                    # Inline structures
+                    append result "$prefix  content: [llength $content] inlines\n"
+                    if {$indent < 2} {
+                        foreach inline $content {
+                            if {[dict exists $inline text]} {
+                                set text [dict get $inline text]
+                                append result "$prefix    {type: [dict get $inline type] text: [string range $text 0 40]...}\n"
+                            } else {
+                                append result "$prefix    {type: [dict get $inline type]}\n"
+                            }
+                        }
+                    }
+                } elseif {[dict exists $first term]} {
+                    # List items
+                    append result "$prefix  content: [llength $content] items\n"
+                } else {
+                    append result "$prefix  content: [string range $content 0 60]...\n"
+                }
+            } else {
+                append result "$prefix  content: [string range $content 0 60]...\n"
+            }
+        }
+        
+        if {[dict exists $node meta]} {
+            set meta [dict get $node meta]
+            if {[dict size $meta] > 0} {
+                append result "$prefix  meta: $meta\n"
+            }
+        }
+        
+        append result "$prefix}\n"
+    }
+    
+    return $result
+}
+
+proc n2txt::usage {} {
+    puts "Usage: n2txt \[input.n\] \[output.txt\] \[options\]"
+    puts ""
+    puts "Options:"
+    puts "  --ast            Output AST instead of rendered text"
+    puts "  --format text    Output as plain text (default)"
+    puts "  --format markdown  Output as Markdown"
+    puts "  --warnings       Show parser warnings"
+    puts "  --debug          Enable debug output"
+    puts "  --help           Show this help message"
+    puts ""
+    puts "Examples:"
+    puts "  n2txt canvas.n                      # Convert to text, output to stdout"
+    puts "  n2txt canvas.n output.txt           # Convert to text, save to file"
+    puts "  n2txt canvas.n --ast                # Output AST structure"
+    puts "  n2txt canvas.n --format markdown    # Output as Markdown"
+    puts "  n2txt - output.txt                  # Read from stdin"
+    puts "  cat canvas.n | n2txt               # Pipe from stdin"
+}
+
+proc n2txt::main {argv} {
+    variable options
+    
+    set inputFile ""
+    set outputFile ""
+    set showAST 0
+    set showWarnings 0
+    set debug 0
+    set format "text"
+    
+    # Parse arguments
+    foreach arg $argv {
+        switch $arg {
+            --ast {
+                set showAST 1
+            }
+            --warnings {
+                set showWarnings 1
+            }
+            --debug {
+                set debug 1
+            }
+            --format {
+                # handled by next iteration via flag
+            }
+            --format=text {
+                set format "text"
+            }
+            --format=markdown {
+                set format "markdown"
+            }
+            --help {
+                n2txt::usage
+                exit 0
+            }
+            default {
+                if {$arg eq ""} {
+                    continue
+                }
+                # Handle --format value (two-arg form)
+                if {$arg eq "text" || $arg eq "markdown"} {
+                    set format $arg
+                    continue
+                }
+                if {[string match "-*" $arg]} {
+                    puts stderr "Unknown option: $arg"
+                    n2txt::usage
+                    exit 1
+                }
+                if {$inputFile eq ""} {
+                    set inputFile $arg
+                } elseif {$outputFile eq ""} {
+                    set outputFile $arg
+                } else {
+                    puts stderr "Too many arguments"
+                    n2txt::usage
+                    exit 1
+                }
+            }
+        }
+    }
+
+    # Enable debug output via debug-0.2 if requested
+    if {$debug} {
+        catch {debug::level 3}
+        puts stderr "Reading file: [expr {$inputFile eq "" || $inputFile eq "-" ? "stdin" : $inputFile}]"
+    }
+
+    # Read input: stdin if no file given or "-" specified
+    if {$inputFile eq "" || $inputFile eq "-"} {
+        set nroffText [read stdin]
+        set sourceFile ""
+    } else {
+        if {![file exists $inputFile]} {
+            puts stderr "Error: File not found: $inputFile"
+            exit 1
+        }
+        set fh [open $inputFile r]
+        set nroffText [read $fh]
+        close $fh
+        set sourceFile $inputFile
+    }
+
+    if {$debug} {
+        puts stderr "Parsing nroff text ([string length $nroffText] bytes)..."
+    }
+    
+    # Parse nroff text (pass sourceFile for .so include resolution)
+    set ast [nroffparser::parse $nroffText $sourceFile]
+    
+    if {$debug} {
+        puts stderr "Parsed [llength $ast] nodes"
+    }
+    
+    # Show warnings if requested
+    if {$showWarnings} {
+        set warnings [nroffparser::validate $ast]
+        if {[llength $warnings] > 0} {
+            puts stderr "\nWarnings:"
+            foreach warning $warnings {
+                puts stderr "  $warning"
+            }
+            puts stderr ""
+        }
+    }
+    
+    # Generate output
+    if {$showAST} {
+        set output [n2txt::printAST $ast]
+    } elseif {$format eq "markdown"} {
+        set output [n2txt::renderMarkdown $ast]
+    } else {
+        set output [n2txt::renderText $ast]
+    }
+    
+    # Write output
+    if {$outputFile ne ""} {
+        set fh [open $outputFile w]
+        puts -nonewline $fh $output
+        close $fh
+        if {$debug} {
+            puts stderr "Output written to: $outputFile"
+        }
+    } else {
+        puts -nonewline $output
+    }
+}
+
+# Run main if executed directly
+if {[info exists argv0] && [file tail [info script]] eq [file tail $argv0]} {
+    n2txt::main $argv
+}

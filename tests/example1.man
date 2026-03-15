@@ -1,0 +1,11 @@
+.TH Test 1
+.SH NAME
+test \- simple test command
+
+.SH DESCRIPTION
+This is a test description.
+
+\fB BoldText\fR and \fI ItalicText\fR.
+
+.PP
+Another paragraph.

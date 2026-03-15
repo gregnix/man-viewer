@@ -1,0 +1,110 @@
+#!/usr/bin/env tclsh
+# mantohtml -- nroff Man Page zu HTML Konverter
+#
+# Verwendung:
+#   mantohtml input.n [output.html] [--link=local|online|anchor]
+#   cat input.n | mantohtml - [output.html]
+#   mantohtml --help
+
+package require Tcl 8.6-
+
+set scriptDir [file dirname [file normalize [info script]]]
+set libDir    [file join [file dirname $scriptDir] lib tm]
+
+if {[catch {source [file join $libDir nroffparser-0.2.tm]} err]} {
+    puts stderr "Fehler: nroffparser-0.2.tm nicht gefunden: $err"
+    exit 1
+}
+if {[catch {source [file join $libDir mantohtml-0.1.tm]} err]} {
+    puts stderr "Fehler: mantohtml-0.1.tm nicht gefunden: $err"
+    exit 1
+}
+
+proc usage {} {
+    puts stderr {Verwendung: mantohtml input.n [output.html] [--link=local|online|anchor]
+       mantohtml - [output.html]       (stdin lesen)
+       mantohtml --help
+
+Optionen:
+  --link=local    SEE ALSO Links zeigen auf lokale .html-Dateien (Standard)
+  --link=online   SEE ALSO Links zeigen auf tcl.tk/man/...
+  --link=anchor   SEE ALSO Links zeigen auf #man-name Anker
+  --title=TEXT    Seitentitel (Standard: aus .TH-Zeile)
+  --warnings      Parser-Warnungen ausgeben}
+    exit 1
+}
+
+# Argumente parsen
+set inputFile  ""
+set outputFile ""
+set linkMode   "local"
+set pageTitle  ""
+set showWarnings 0
+
+foreach arg $argv {
+    switch -glob -- $arg {
+        --help         { usage }
+        --link=*       { set linkMode   [string range $arg 7 end] }
+        --title=*      { set pageTitle  [string range $arg 8 end] }
+        --warnings     { set showWarnings 1 }
+        -*             { puts stderr "Unbekannte Option: $arg"; usage }
+        default {
+            if {$inputFile eq ""} {
+                set inputFile $arg
+            } elseif {$outputFile eq ""} {
+                set outputFile $arg
+            } else {
+                puts stderr "Zu viele Argumente."; usage
+            }
+        }
+    }
+}
+
+if {$inputFile eq ""} { usage }
+
+# Eingabe lesen
+if {$inputFile eq "-"} {
+    fconfigure stdin -encoding utf-8
+    set text [read stdin]
+    set src  ""
+} else {
+    if {![file exists $inputFile]} {
+        puts stderr "Fehler: Datei nicht gefunden: $inputFile"
+        exit 1
+    }
+    set fh [open $inputFile r]
+    fconfigure $fh -encoding utf-8
+    set text [read $fh]
+    close $fh
+    set src $inputFile
+}
+
+# Parsen
+set ast [nroffparser::parse $text $src]
+
+# Warnungen
+if {$showWarnings} {
+    set warnings $nroffparser::warnings
+    if {[llength $warnings] > 0} {
+        puts stderr "[llength $warnings] Parser-Warnung(en):"
+        foreach w $warnings { puts stderr "  $w" }
+    }
+}
+
+# Rendern
+set opts [dict create linkMode $linkMode]
+if {$pageTitle ne ""} { dict set opts title $pageTitle }
+
+set html [mantohtml::render $ast $opts]
+
+# Ausgabe
+if {$outputFile ne "" && $outputFile ne "-"} {
+    set fh [open $outputFile w]
+    fconfigure $fh -encoding utf-8
+    puts -nonewline $fh $html
+    close $fh
+    puts stderr "Gespeichert: $outputFile"
+} else {
+    fconfigure stdout -encoding utf-8
+    puts -nonewline $html
+}

@@ -1,0 +1,21 @@
+.TH Example 1
+.SH NAME
+example \- example command
+
+.SH SYNOPSIS
+\fBexample\fR \fIpathName\fR ?\fIoptions\fR?
+
+.SH DESCRIPTION
+This is a more complex example.
+
+.SH OPTIONS
+.TP
+\fB\-option\fR \fIvalue\fR
+Description of option.
+
+.TP
+\fB\-flag\fR
+Description of flag.
+
+.SH "SEE ALSO"
+other(1)
