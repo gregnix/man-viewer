@@ -3,8 +3,7 @@
 A Tcl/Tk-based viewer and converter for nroff-formatted man pages.
 
 **Version:** 0.1  
-**Status:** Work in progress. The nroff parser and Markdown renderer are
-functional. The Tk viewer application is under active development.  
+**Status:** Stable. Parser, Markdown renderer, and Tk viewer are functional.  
 **Compatibility:** Tcl/Tk 8.6+ and Tcl/Tk 9.x
 
 ---
@@ -25,7 +24,10 @@ man-viewer/
 │       ├── debug-0.2.tm        # debug/trace toolkit
 │       └── ...                 # further modules
 ├── tools/
-│   └── nroff2md.tcl            # standalone converter (all-in-one)
+│   ├── nroff2md.tcl            # standalone converter (all-in-one, generated)
+│   ├── build-nroff2md.tcl      # build script for nroff2md.tcl
+│   ├── nroff2md-header.tcl     # header source
+│   └── nroff2md-main.tcl       # CLI source
 ├── tests/
 │   ├── run-all-tests.tcl       # test runner
 │   └── *.tcl                   # test suites

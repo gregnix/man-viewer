@@ -1,5 +1,33 @@
 # Changelog
 
+## Version 0.1 -- 2026-03-15
+
+### man-viewer.tcl -- Export as Markdown
+
+- **File → Export as Markdown…** (Ctrl+M): exports the current page
+  to a `.md` file via `ast2md::render`
+- `fconfigure -encoding utf-8` for both read and write
+
+### ast2md-0.1 -- TP-Bug fix
+
+- `.TP` entries where term and description are on the same line
+  (e.g. `\fBauto\fR As the input mode.`) were rendered with the
+  entire line as bold term. Fixed: first inline becomes term,
+  remainder becomes description.
+
+### tests/test-mdexport.tcl -- new
+
+30 tests in 7 groups (A–G): structure, inline formatting, code blocks,
+lists, options, file roundtrip, TP-bug fix.
+
+### tools/build-nroff2md.tcl -- new
+
+Idempotent build script that assembles `nroff2md.tcl` from sources:
+`nroff2md-header.tcl` + `lib/tm/*.tm` + `nroff2md-main.tcl`.
+`--check` mode exits 1 if `nroff2md.tcl` is out of date.
+
+---
+
 ## Version 0.1 -- 2026-03-13
 
 Initial public release.
@@ -38,6 +66,7 @@ Initial public release.
 - Embedded search bar (Ctrl+F) with real-time highlighting
 - Full-text search across indexed man pages (Ctrl+Shift+F)
 - HTML export (Ctrl+E)
+- Markdown export (Ctrl+M)
 - Dark mode (Ctrl+Shift+D)
 - Configurable fonts and font size
 - Settings persisted in `~/.config/man-viewer/settings.conf`
