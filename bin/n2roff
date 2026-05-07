@@ -1,0 +1,135 @@
+#!/usr/bin/env tclsh
+# n2roff -- nroff → DocIR → nroff (Round-Trip-Konverter)
+#
+# Use cases:
+#   - Sanitize: alte handgeschriebene .n-Dateien werden durch DocIR
+#     normalisiert (konsistente Formatierung, Leerzeilen, Macro-Stil)
+#   - Test: prüfen ob die Round-Trip-Pipeline für eine Datei sauber
+#     durchläuft
+#   - Diff-Basis: Original vs Re-Render zeigt was DocIR an Information
+#     verliert (typisch: Kommentare, .so-Includes, manuelles Layout)
+#
+# Verwendung:
+#   n2roff input.n                  # to stdout
+#   n2roff input.n output.n         # to file
+
+package require Tcl 8.6-
+
+set scriptDir [file dirname [file normalize [info script]]]
+set projectRoot [file dirname $scriptDir]
+set libDir [file join $projectRoot lib tm]
+
+
+# DocIR-Module via Loader# Eigene Module aus lib/tm/
+::tcl::tm::path add [file join $projectRoot lib tm]
+# Module laden
+package require docir
+package require docir::roffSource
+package require docir::roff
+package require nroffparser
+
+# nroffparser
+foreach mod {mvdebug-0.2.tm nroffparser-0.2.tm} {
+    set p [file join $libDir $mod]
+    if {[file exists $p]} {
+        source -encoding utf-8 $p
+    } elseif {$mod eq "mvdebug-0.2.tm"} {
+        # Stubs falls mvdebug fehlt
+        namespace eval ::debug {
+            proc scope {args} {}
+            proc log {args} {}
+            proc level {args} { return 0 }
+            proc getLevel {args} { return 0 }
+            proc startTimer {args} {}
+            proc stopTimer {args} {}
+            proc traceLine {args} {}
+        }
+    }
+}
+
+proc usage {} {
+    puts "Usage: n2roff input.n \[output.n\]"
+    puts ""
+    puts "  Round-Trip-Konvertierung: nroff → DocIR → nroff."
+    puts "  Ohne output.n: Ausgabe nach stdout."
+    exit 1
+}
+
+if {[llength $argv] < 1} { usage }
+
+set inputFile [lindex $argv 0]
+if {![file exists $inputFile]} {
+    puts stderr "Datei nicht gefunden: $inputFile"
+    exit 1
+}
+
+set outputFile ""
+if {[llength $argv] >= 2} {
+    set outputFile [lindex $argv 1]
+}
+
+# Pipeline
+set fh [open $inputFile r]
+fconfigure $fh -encoding utf-8
+set nroff [read $fh]
+close $fh
+
+# Format-Detection: erste 50 nicht-leeren Zeilen anschauen.
+# nroff hat typischerweise: .MACRO am Zeilenanfang, '\\\" Kommentare,
+# .so Includes, .TH/.SH/.SS-Header.
+# Markdown hat: # Heading, ## Heading, ```code, etc.
+proc looksLikeNroff {text} {
+    set lines [split $text "\n"]
+    set nroffHits 0
+    set mdHits 0
+    set checked 0
+    foreach line $lines {
+        set line [string trim $line]
+        if {$line eq ""} continue
+        incr checked
+        if {$checked > 50} break
+
+        # nroff-Indikatoren
+        if {[regexp {^\.[A-Z][A-Za-z]?\s} $line]}    { incr nroffHits 2 }
+        if {[regexp {^\.\\".*}              $line]}  { incr nroffHits 2 }
+        if {[regexp {^\\fB|^\\fI}           $line]}  { incr nroffHits 1 }
+        if {[regexp {^'\\".*}               $line]}  { incr nroffHits 2 }
+
+        # Markdown-Indikatoren
+        if {[regexp {^#{1,6}\s+\S}          $line]}  { incr mdHits 2 }
+        if {[regexp {^```}                  $line]}  { incr mdHits 2 }
+        if {[regexp {^\|.*\|}               $line]}  { incr mdHits 1 }
+        if {[regexp {^\s*[-*+]\s+\S}        $line]}  { incr mdHits 1 }
+    }
+    # Mehr nroff-Hits als Markdown-Hits → es ist nroff
+    return [expr {$nroffHits > $mdHits}]
+}
+
+if {![looksLikeNroff $nroff]} {
+    puts stderr "Fehler: $inputFile sieht nicht wie nroff aus."
+    puts stderr ""
+    puts stderr "n2roff erwartet nroff-Eingabe (Round-Trip nroff → DocIR → nroff)."
+    puts stderr "Wenn du Markdown nach nroff konvertieren willst, nutze stattdessen:"
+    set hintOut [expr {$outputFile ne "" ? $outputFile : "output.n"}]
+    puts stderr "  md2roff $inputFile $hintOut"
+    exit 1
+}
+
+if {[catch {
+    set ast [nroffparser::parse $nroff $inputFile]
+    set ir  [::docir::roff::fromAst $ast]
+    set out [::docir::roff::render $ir]
+} err]} {
+    puts stderr "Error converting $inputFile: $err"
+    exit 1
+}
+
+if {$outputFile eq ""} {
+    puts -nonewline $out
+} else {
+    set fh [open $outputFile w]
+    fconfigure $fh -encoding utf-8
+    puts -nonewline $fh $out
+    close $fh
+    puts "Wrote: $outputFile"
+}

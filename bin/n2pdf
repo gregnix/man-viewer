@@ -1,0 +1,126 @@
+#!/usr/bin/env tclsh
+# n2pdf -- convert nroff man pages to PDF via DocIR pipeline
+#
+# Pipeline: nroff → nroffparser → docir-roff → docir-pdf
+#
+# Requires pdf4tcl (>= 0.9). Install via 'apt install tcllib' on
+# Debian/Ubuntu, or as a separate package. The script gives a clear
+# error message if pdf4tcl is missing.
+#
+# Usage:
+#   n2pdf input.n output.pdf                # required: explicit output path
+#   n2pdf input.n output.pdf --paper letter
+#   n2pdf input.n output.pdf --margin 72    # margin in pt (default 56 ≈ 20mm)
+#   n2pdf input.n output.pdf --font-size 12
+#   n2pdf input.n output.pdf --title "Foo" --author "Bar"
+#   cat input.n | n2pdf - output.pdf
+
+package require Tcl 8.6-
+
+set scriptDir [file dirname [file normalize [info script]]]
+set projectRoot [file dirname $scriptDir]
+
+# Eigene Module aus lib/tm/
+::tcl::tm::path add [file join $projectRoot lib tm]
+# Module laden
+package require docir
+package require docir::roffSource
+package require docir::pdf
+package require nroffparser
+
+set inputPath ""
+set outputPath ""
+set paper "a4"
+set margin 56
+set fontSize 11
+set title ""
+set author ""
+
+set args $argv
+set i 0
+while {$i < [llength $args]} {
+    set arg [lindex $args $i]
+    switch -- $arg {
+        --paper     { incr i; set paper [lindex $args $i] }
+        --margin    { incr i; set margin [lindex $args $i] }
+        --font-size { incr i; set fontSize [lindex $args $i] }
+        --title     { incr i; set title [lindex $args $i] }
+        --author    { incr i; set author [lindex $args $i] }
+        -h - --help {
+            puts "Usage: n2pdf input.n output.pdf \[options...\]"
+            puts ""
+            puts "Options:"
+            puts "  --paper a4|letter|...   Paper size (default a4)"
+            puts "  --margin N              Margin in points (default 56 ≈ 20mm)"
+            puts "  --font-size N           Base font size (default 11)"
+            puts "  --title TEXT            PDF metadata title"
+            puts "  --author TEXT           PDF metadata author"
+            puts ""
+            puts "Use '-' as input to read from stdin."
+            exit 0
+        }
+        default {
+            if {$inputPath eq ""} {
+                set inputPath $arg
+            } elseif {$outputPath eq ""} {
+                set outputPath $arg
+            } else {
+                puts stderr "Unknown argument: $arg"
+                exit 1
+            }
+        }
+    }
+    incr i
+}
+
+if {$inputPath eq ""} {
+    puts stderr "Usage: n2pdf input.n \[output.pdf\] \[options...\]   (try --help)"
+    exit 1
+}
+
+# Default output path: input mit .pdf-Endung
+if {$outputPath eq ""} {
+    if {$inputPath eq "-"} {
+        puts stderr "Error: when reading from stdin, output path is required"
+        exit 1
+    }
+    set base [file rootname $inputPath]
+    set outputPath "${base}.pdf"
+}
+
+# Read input
+if {$inputPath eq "-"} {
+    fconfigure stdin -encoding utf-8
+    set nroff [read stdin]
+} else {
+    if {![file exists $inputPath]} {
+        puts stderr "File not found: $inputPath"
+        exit 1
+    }
+    set fh [open $inputPath r]
+    fconfigure $fh -encoding utf-8
+    set nroff [read $fh]
+    close $fh
+}
+
+# Process
+set ast [nroffparser::parse $nroff]
+set ir  [docir::roff::fromAst $ast]
+
+set opts [dict create paper $paper margin $margin fontSize $fontSize]
+if {$title  ne ""} { dict set opts title  $title  }
+if {$author ne ""} { dict set opts author $author }
+
+if {[catch {docir::pdf::render $ir $outputPath $opts} err]} {
+    puts stderr "PDF rendering failed: $err"
+    if {[string match "*pdf4tcl*" $err]} {
+        puts stderr ""
+        puts stderr "pdf4tcl is required. Install via:"
+        puts stderr "  Debian/Ubuntu: sudo apt install tcllib"
+        puts stderr "  Fedora:        sudo dnf install tcllib"
+        puts stderr "  macOS:         brew install tcllib"
+    }
+    exit 1
+}
+
+puts "Wrote: $outputPath"

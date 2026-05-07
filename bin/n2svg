@@ -1,0 +1,108 @@
+#!/usr/bin/env tclsh
+# n2svg -- convert nroff man pages to SVG via DocIR pipeline
+#
+# Pipeline: nroff → nroffparser → docir-roff → docir-svg
+#
+# Usage:
+#   n2svg input.n                          # to stdout
+#   n2svg input.n output.svg               # to file
+#   n2svg input.n --mode native            # native SVG <text> elements
+#                                          # (Inkscape-compatible, etc.)
+#   n2svg input.n --mode foreignObject     # default: HTML in <foreignObject>
+#                                          # (browser-only)
+#   n2svg input.n --width 1000             # SVG width in px (default 800)
+#   n2svg input.n --height 600             # fixed height (default: auto)
+#   n2svg input.n --font-size 12
+#   cat input.n | n2svg -                  # from stdin
+
+package require Tcl 8.6-
+
+set scriptDir [file dirname [file normalize [info script]]]
+set projectRoot [file dirname $scriptDir]
+
+# Eigene Module aus lib/tm/
+::tcl::tm::path add [file join $projectRoot lib tm]
+# Module laden
+package require docir
+package require docir::roffSource
+package require docir::svg
+package require nroffparser
+
+set inputPath ""
+set outputPath ""
+set mode "foreignObject"
+set width 800
+set height "auto"
+set fontSize 14
+
+set args $argv
+set i 0
+while {$i < [llength $args]} {
+    set arg [lindex $args $i]
+    switch -- $arg {
+        --mode      { incr i; set mode [lindex $args $i] }
+        --width     { incr i; set width [lindex $args $i] }
+        --height    { incr i; set height [lindex $args $i] }
+        --font-size { incr i; set fontSize [lindex $args $i] }
+        -h - --help {
+            puts "Usage: n2svg input.n \[output.svg\] \[--mode foreignObject|native\]"
+            puts "                          \[--width N\] \[--height N\] \[--font-size N\]"
+            puts ""
+            puts "Modes:"
+            puts "  foreignObject  HTML inside <foreignObject> (browsers only, default)"
+            puts "  native         Native <text> elements (universally renderable)"
+            exit 0
+        }
+        default {
+            if {$inputPath eq ""} {
+                set inputPath $arg
+            } elseif {$outputPath eq ""} {
+                set outputPath $arg
+            } else {
+                puts stderr "Unknown argument: $arg"
+                exit 1
+            }
+        }
+    }
+    incr i
+}
+
+if {$inputPath eq ""} {
+    puts stderr "Usage: n2svg input.n \[output.svg\] \[options...\]   (try --help)"
+    exit 1
+}
+
+# Read input
+if {$inputPath eq "-"} {
+    fconfigure stdin -encoding utf-8
+    set nroff [read stdin]
+} else {
+    if {![file exists $inputPath]} {
+        puts stderr "File not found: $inputPath"
+        exit 1
+    }
+    set fh [open $inputPath r]
+    fconfigure $fh -encoding utf-8
+    set nroff [read $fh]
+    close $fh
+}
+
+# Process
+set ast [nroffparser::parse $nroff]
+set ir  [docir::roff::fromAst $ast]
+set svg [docir::svg::render $ir [dict create \
+    mode $mode \
+    width $width \
+    height $height \
+    fontSize $fontSize]]
+
+# Write output
+if {$outputPath eq ""} {
+    fconfigure stdout -encoding utf-8
+    puts -nonewline $svg
+} else {
+    set fh [open $outputPath w]
+    fconfigure $fh -encoding utf-8
+    puts -nonewline $fh $svg
+    close $fh
+}

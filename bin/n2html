@@ -1,0 +1,165 @@
+#!/usr/bin/env tclsh
+# n2html -- convert nroff man pages to HTML via DocIR pipeline
+#
+# Pipeline: nroff → nroffparser → docir-roff → docir-html
+#
+# Usage:
+#   n2html input.n                    # to stdout
+#   n2html input.n output.html        # to file
+#   n2html input.n --body-only        # produce <body>-fragment instead of full document
+#   n2html input.n --title "Foo"      # explicit title
+#   cat input.n | n2html -            # from stdin
+
+package require Tcl 8.6-
+
+set scriptDir [file dirname [file normalize [info script]]]
+set projectRoot [file dirname $scriptDir]
+
+
+# Eigene Module aus lib/tm/
+::tcl::tm::path add [file join $projectRoot lib tm]
+# Module laden
+package require docir
+package require docir::roffSource
+package require docir::html
+package require nroffparser
+
+# ============================================================
+# Parse args
+# ============================================================
+
+set inputPath ""
+set outputPath ""
+set standalone 1
+set title ""
+set theme "default"
+set lang "en"
+set linkMode "local"
+set viewport 1
+set includeToc 0
+
+set args $argv
+set i 0
+while {$i < [llength $args]} {
+    set arg [lindex $args $i]
+    switch -- $arg {
+        --body-only {
+            set standalone 0
+        }
+        --title {
+            incr i
+            set title [lindex $args $i]
+        }
+        --theme {
+            incr i
+            set theme [lindex $args $i]
+            if {$theme ni {default manpage none}} {
+                puts stderr "Error: --theme must be 'default', 'manpage', or 'none'"
+                exit 1
+            }
+        }
+        --lang {
+            incr i
+            set lang [lindex $args $i]
+        }
+        --link-mode {
+            incr i
+            set linkMode [lindex $args $i]
+            if {$linkMode ni {local anchor online}} {
+                puts stderr "Error: --link-mode must be 'local', 'anchor', or 'online'"
+                exit 1
+            }
+        }
+        --toc {
+            set includeToc 1
+        }
+        --no-viewport {
+            set viewport 0
+        }
+        -h - --help {
+            puts "Usage: n2html input.n \[output.html\] \[options...\]"
+            puts ""
+            puts "Options:"
+            puts "  --body-only         Output body fragment only (no <html> wrapper)"
+            puts "  --title TEXT        Override page title"
+            puts "  --theme NAME        CSS theme: default | manpage | none"
+            puts "  --lang CODE         HTML lang attribute (default 'en')"
+            puts "  --link-mode MODE    SEE ALSO links: local | anchor | online"
+            puts "                      local  → name.section.html (default)"
+            puts "                      anchor → #man-name (intra-document)"
+            puts "                      online → tcl.tk URLs (TclCmd/TkCmd)"
+            puts "  --toc               Include table of contents"
+            puts "  --no-viewport       Omit viewport meta tag"
+            puts ""
+            puts "Use '-' as input to read from stdin."
+            exit 0
+        }
+        default {
+            if {$inputPath eq ""} {
+                set inputPath $arg
+            } elseif {$outputPath eq ""} {
+                set outputPath $arg
+            } else {
+                puts stderr "Unknown argument: $arg"
+                exit 1
+            }
+        }
+    }
+    incr i
+}
+
+if {$inputPath eq ""} {
+    puts stderr "Usage: n2html input.n \[output.html\] \[--body-only\] \[--title TITLE\]"
+    exit 1
+}
+
+# ============================================================
+# Read input
+# ============================================================
+
+if {$inputPath eq "-"} {
+    fconfigure stdin -encoding utf-8
+    set nroff [read stdin]
+} else {
+    if {![file exists $inputPath]} {
+        puts stderr "File not found: $inputPath"
+        exit 1
+    }
+    set fh [open $inputPath r]
+    fconfigure $fh -encoding utf-8
+    set nroff [read $fh]
+    close $fh
+}
+
+# ============================================================
+# Process
+# ============================================================
+
+set ast [nroffparser::parse $nroff]
+set ir  [docir::roff::fromAst $ast]
+
+set opts [dict create \
+    standalone $standalone \
+    theme      $theme \
+    lang       $lang \
+    linkMode   $linkMode \
+    viewport   $viewport \
+    includeToc $includeToc]
+if {$title ne ""} {
+    dict set opts title $title
+}
+set html [docir::html::render $ir $opts]
+
+# ============================================================
+# Write output
+# ============================================================
+
+if {$outputPath eq ""} {
+    fconfigure stdout -encoding utf-8
+    puts -nonewline $html
+} else {
+    set fh [open $outputPath w]
+    fconfigure $fh -encoding utf-8
+    puts -nonewline $fh $html
+    close $fh
+}

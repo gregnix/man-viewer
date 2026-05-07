@@ -1,0 +1,115 @@
+#!/usr/bin/env tclsh
+# md2roff -- Markdown → DocIR → nroff (TIP-700 Reverse-Pipeline)
+#
+# Use case: Schreibe Manpages in Markdown, exportiere nach nroff für
+# klassische Distribution. Ergänzt TIP-700 (Markdown statt nroff für
+# Tcl/Tk-Manpages) um den Backwards-Kompat-Pfad.
+#
+# Verwendung:
+#   md2roff input.md                 # to stdout
+#   md2roff input.md output.n        # to file
+#
+# Erwartetes Markdown-Format:
+#   - Erster H1 wird zu .SH NAME
+#   - Folgende H1 → .SH (level=1)
+#   - H2+ → .SS
+#   - Code-blocks → .CS / .CE
+#   - Listen werden zu .IP \(bu (bullet) oder .IP [N] (numbered)
+#   - Definition-Listen (mdstack-Erweiterung) → .TP
+#
+# Setup:
+#   - mdstack-Repo muss erreichbar sein (für mdparser)
+#   - docir-Repo muss erreichbar sein (über docir-loader)
+
+package require Tcl 8.6-
+
+set scriptDir [file dirname [file normalize [info script]]]
+set projectRoot [file dirname $scriptDir]
+
+# Eigene Module aus lib/tm/
+::tcl::tm::path add [file join $projectRoot lib tm]
+# Module laden — Standard Tcl Module System
+package require docir
+package require docir::mdSource
+package require docir::roff
+package require mdstack::parser
+
+proc usage {} {
+    puts "Usage: md2roff input.md \[output.n\]"
+    puts ""
+    puts "  Konvertiert Markdown nach nroff via DocIR-Pipeline."
+    puts "  Ohne output.n: Ausgabe nach stdout."
+    exit 1
+}
+
+if {[llength $argv] < 1} { usage }
+
+set inputFile [lindex $argv 0]
+if {![file exists $inputFile]} {
+    puts stderr "Datei nicht gefunden: $inputFile"
+    exit 1
+}
+
+set outputFile ""
+if {[llength $argv] >= 2} {
+    set outputFile [lindex $argv 1]
+}
+
+# Pipeline
+set fh [open $inputFile r]
+fconfigure $fh -encoding utf-8
+set md [read $fh]
+close $fh
+
+# Format-Detection: warnen wenn die Eingabe wie nroff aussieht
+proc looksLikeNroff {text} {
+    set lines [split $text "\n"]
+    set nroffHits 0
+    set mdHits 0
+    set checked 0
+    foreach line $lines {
+        set line [string trim $line]
+        if {$line eq ""} continue
+        incr checked
+        if {$checked > 50} break
+
+        if {[regexp {^\.[A-Z][A-Za-z]?\s} $line]}    { incr nroffHits 2 }
+        if {[regexp {^\.\\".*}              $line]}  { incr nroffHits 2 }
+        if {[regexp {^\\fB|^\\fI}           $line]}  { incr nroffHits 1 }
+        if {[regexp {^'\\".*}               $line]}  { incr nroffHits 2 }
+        if {[regexp {^#{1,6}\s+\S}          $line]}  { incr mdHits 2 }
+        if {[regexp {^```}                  $line]}  { incr mdHits 2 }
+        if {[regexp {^\|.*\|}               $line]}  { incr mdHits 1 }
+        if {[regexp {^\s*[-*+]\s+\S}        $line]}  { incr mdHits 1 }
+    }
+    return [expr {$nroffHits > $mdHits}]
+}
+
+if {[looksLikeNroff $md]} {
+    puts stderr "Fehler: $inputFile sieht wie nroff aus, nicht wie Markdown."
+    puts stderr ""
+    puts stderr "md2roff erwartet Markdown-Eingabe (Markdown → DocIR → nroff)."
+    puts stderr "Wenn du nroff Round-Trip willst, nutze stattdessen:"
+    set hintOut [expr {$outputFile ne "" ? $outputFile : "output.n"}]
+    puts stderr "  n2roff $inputFile $hintOut"
+    exit 1
+}
+
+if {[catch {
+    set ast [mdstack::parser::parse $md]
+    set ir  [::docir::md::fromAst $ast]
+    set out [::docir::roff::render $ir]
+} err]} {
+    puts stderr "Error converting $inputFile: $err"
+    exit 1
+}
+
+if {$outputFile eq ""} {
+    puts -nonewline $out
+} else {
+    set fh [open $outputFile w]
+    fconfigure $fh -encoding utf-8
+    puts -nonewline $fh $out
+    close $fh
+    puts "Wrote: $outputFile"
+}
