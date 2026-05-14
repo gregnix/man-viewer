@@ -63,7 +63,14 @@ man-viewer/
 │   ├── n2md                    # nroff → Markdown
 │   ├── n2pdf                   # nroff → PDF (requires pdf4tcl)
 │   ├── n2svg                   # nroff → SVG
-│   └── n2txt                   # nroff → plain text (no DocIR)
+│   ├── n2txt                   # nroff → plain text (no DocIR)
+│   ├── n2roff                  # nroff → DocIR → nroff (round-trip)
+│   ├── md2roff                 # Markdown → nroff (TIP-700 reverse)
+│   ├── ast-diff.tcl            # dev tool: AST diff
+│   ├── ast-validate.tcl        # dev tool: AST validator
+│   ├── check-all-modules.tcl   # dev tool: syntax-check lib/tm/
+│   ├── check-tcl-syntax.tcl    # dev tool: single-file syntax check
+│   └── check-canvas.sh         # dev tool: canvas.n smoke check
 ├── lib/
 │   ├── docir-loader.tcl        # Finds the docir repo, sources modules directly
 │   └── tm/
@@ -98,6 +105,8 @@ n2md   input.n output.md
 n2pdf  input.n output.pdf  [--paper a4|letter]
 n2svg  input.n output.svg
 n2txt  input.n output.txt    # does NOT use DocIR (direct AST→text)
+n2roff input.n output.n      # round-trip via DocIR (sanitize / normalize)
+md2roff input.md output.n    # reverse pipeline: Markdown → nroff (TIP-700)
 ```
 
 Example:
@@ -108,6 +117,18 @@ n2html update.n update.html --theme manpage --lang de --link-mode online --toc
 
 Produces a German HTML manpage in mvmantohtml style with table of contents
 and tcl.tk online links for SEE ALSO references.
+
+### Developer tools (bin/)
+
+Intern use, mainly for parser/renderer debugging:
+
+```bash
+bin/ast-diff.tcl ast1.log ast2.log [output.log]   # Compare two AST dumps
+bin/ast-validate.tcl <ast.log> [--warn]           # Validate AST structure
+bin/check-all-modules.tcl                         # Syntax-check all lib/tm/ modules
+bin/check-tcl-syntax.tcl file.tcl                 # Tcl-parser syntax check
+bin/check-canvas.sh                               # Quick canvas.n parse smoke test
+```
 
 ---
 

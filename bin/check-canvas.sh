@@ -1,8 +1,20 @@
 #!/bin/bash
 # Quick check script for canvas.n parsing
 # Compares n2txt output with expected results
+#
+# Usage:
+#   bin/check-canvas.sh [path/to/canvas.n]
+#   bin/check-canvas.sh         # uses $CANVAS_N or ./tests/canvas.n
+#
+# Set CANVAS_N env-var or pass the path as $1.
 
-INPUT="/home/greg/Project/2026/code/markdown/man/Tcl_Tk Documentation and Website-e95fae50e9/nroff/tk9.0/doc/canvas.n"
+INPUT="${1:-${CANVAS_N:-./tests/canvas.n}}"
+if [ ! -f "$INPUT" ]; then
+    echo "ERROR: canvas.n not found at: $INPUT" >&2
+    echo "Usage: $0 [path/to/canvas.n]" >&2
+    echo "   or: CANVAS_N=path $0" >&2
+    exit 1
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 N2TXT="$SCRIPT_DIR/n2txt"
 
