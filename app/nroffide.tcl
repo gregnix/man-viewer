@@ -161,6 +161,152 @@ namespace eval ::ide::syntax {
     }
 }
 
+# ============================================================
+# Such-Funktion (genutzt von --search CLI und Cross-App-Menue)
+# ============================================================
+
+proc ::ide::doSearch {term} {
+    variable editor
+
+    if {$term eq ""} return
+    if {$editor eq "" || ![winfo exists $editor]} {
+        set ::ide::statusText "Suche: Editor noch nicht bereit"
+        return 0
+    }
+
+    # Tag fuer Highlight (einmalig konfigurieren)
+    if {[lsearch -exact [$editor tag names] _ide_search] < 0} {
+        $editor tag configure _ide_search \
+            -background "#ffeb3b" -foreground "#000"
+    }
+    $editor tag remove _ide_search 1.0 end
+
+    # Treffer finden (case-insensitiv)
+    set count 0
+    set firstHit ""
+    set idx 1.0
+    while {1} {
+        set hit [$editor search -nocase -count matchLen -- $term $idx end]
+        if {$hit eq ""} break
+        if {$firstHit eq ""} { set firstHit $hit }
+        set end "$hit + $matchLen chars"
+        $editor tag add _ide_search $hit $end
+        set idx $end
+        incr count
+    }
+
+    if {$count == 0} {
+        set ::ide::statusText "Suche: keine Treffer fuer '$term'"
+        return 0
+    }
+    $editor see $firstHit
+    $editor mark set insert $firstHit
+    set ::ide::statusText "Suche: '$term' -- $count Treffer"
+    return $count
+}
+
+proc ::ide::clearSearch {} {
+    variable editor
+    if {$editor ne "" && [winfo exists $editor]} {
+        catch {$editor tag remove _ide_search 1.0 end}
+    }
+}
+
+# ============================================================
+# Cross-App Kontextmenue (Phase-3)
+# ============================================================
+#
+# Rechts-Klick im Editor bietet "Im Glossar nachschlagen" und
+# "In mdhelp oeffnen" via tcldocs::launcher.
+
+proc ::ide::_pickContextTerm {w} {
+    # Selektion hat Vorrang
+    if {![catch {$w get sel.first sel.last} sel] && [string trim $sel] ne ""} {
+        return [string trim $sel]
+    }
+    # Wort am insert-Cursor
+    set idx [$w index insert]
+    set wStart [$w index "${idx} wordstart"]
+    set wEnd   [$w index "${idx} wordend"]
+    return [string trim [$w get $wStart $wEnd]]
+}
+
+proc ::ide::showContextMenu {w X Y} {
+    set menuName .editorCtxMenu
+    catch {destroy $menuName}
+    menu $menuName -tearoff 0
+
+    # Standard-Edit
+    set hasSel [expr {![catch {$w index sel.first}]}]
+    $menuName add command -label "Kopieren" -accelerator "Ctrl+C" \
+        -state [expr {$hasSel ? "normal" : "disabled"}] \
+        -command [list event generate $w <<Copy>>]
+    $menuName add command -label "Einfuegen" -accelerator "Ctrl+V" \
+        -command [list event generate $w <<Paste>>]
+    $menuName add command -label "Alles markieren" -accelerator "Ctrl+A" \
+        -command [list $w tag add sel 1.0 end]
+    $menuName add separator
+
+    # Cross-App via tcldocs::launcher
+    if {[catch {package present tcldocs::launcher}]} {
+        $menuName add command \
+            -label "Cross-App (tcldocs::launcher fehlt)" -state disabled
+    } else {
+        set glossPath [::tools::findApp glossary]
+        if {$glossPath ne ""} {
+            $menuName add command -label "Im Glossar nachschlagen" \
+                -command [list ::ide::_lookupInGlossary $w]
+        } else {
+            $menuName add command -label "Glossar (nicht gefunden)" -state disabled
+        }
+
+        set mdhelpPath [::tools::findApp mdhelp]
+        if {$mdhelpPath ne ""} {
+            $menuName add command -label "In mdhelp oeffnen" \
+                -command [list ::ide::_openInMdhelp $w]
+        }
+    }
+
+    tk_popup $menuName $X $Y
+}
+
+proc ::ide::_lookupInGlossary {w} {
+    set term [::ide::_pickContextTerm $w]
+    if {$term eq ""} {
+        set ::ide::statusText "Glossar: kein Suchterm"
+        return
+    }
+    set p [::tools::findApp glossary]
+    if {$p eq ""} {
+        tk_messageBox -type ok -icon warning -message "Glossary nicht gefunden."
+        return
+    }
+    if {[catch {::tools::launchApp $p --search $term} err]} {
+        tk_messageBox -type ok -icon error \
+            -message "Konnte Glossary nicht starten: $err"
+        return
+    }
+    set ::ide::statusText "Glossar geoeffnet: $term"
+}
+
+proc ::ide::_openInMdhelp {w} {
+    variable currentFile
+    set p [::tools::findApp mdhelp]
+    if {$p eq ""} {
+        tk_messageBox -type ok -icon warning -message "mdhelp nicht gefunden."
+        return
+    }
+    set args {}
+    # Wenn aktuelle Datei .md-Endung hat: oeffnen
+    if {$currentFile ne "" && [string match -nocase *.md $currentFile]} {
+        lappend args $currentFile
+    }
+    if {[catch {::tools::launchApp $p {*}$args} err]} {
+        tk_messageBox -type ok -icon error \
+            -message "Konnte mdhelp nicht starten: $err"
+    }
+}
+
 proc ::ide::syntax::setup {t} {
     variable knownMacros
 
@@ -293,6 +439,10 @@ proc ::ide::buildEditorPane {parent} {
     bind $editor <<Modified>> [list ::ide::onEditorModified]
     bind $editor <Control-s> [list ::ide::saveFile]
     bind $editor <Control-S> [list ::ide::saveFile]
+
+    # Cross-App-Kontextmenue (Rechts-Klick)
+    bind $editor <Button-3> [list ::ide::showContextMenu %W %X %Y]
+    bind $editor <Control-Button-1> [list ::ide::showContextMenu %W %X %Y]
     bind $editor <Control-o> [list ::ide::openFile]
     bind $editor <Control-O> [list ::ide::openFile]
     bind $editor <Control-r> [list ::ide::runRender]
@@ -1355,10 +1505,65 @@ package require tcldocs::launcher
     {expr {$::ide::currentFile}} \
     {expr {$::ide::currentFile ne "" ? [file dirname $::ide::currentFile] : ""}}
 
-# Falls Datei als Argument: laden
-if {$argc >= 1} {
-    set f [lindex $argv 0]
-    if {[file exists $f]} {
-        ::ide::openFile $f
+# ============================================================
+# CLI-Argumente
+# ============================================================
+#   nroffide.tcl ?<datei>? ?--search TERM? ?--help?
+#
+# --search TERM   : nach App-Start TERM im aktuellen Text suchen,
+#                   Treffer highlighten, zum ersten scrollen.
+# --help          : Kurzhilfe, dann exit.
+
+set ::ide::cli_file ""
+set ::ide::cli_search ""
+
+set _i 0
+while {$_i < $argc} {
+    set _a [lindex $argv $_i]
+    switch -- $_a {
+        --search {
+            incr _i
+            if {$_i >= $argc} {
+                puts stderr "Fehler: --search braucht einen Term"
+                exit 1
+            }
+            set ::ide::cli_search [lindex $argv $_i]
+            incr _i
+        }
+        --help - -h {
+            puts stderr "Aufruf: wish nroffide.tcl ?<datei>? ?--search TERM?"
+            puts stderr ""
+            puts stderr "  <datei>        Pfad zu nroff/Markdown-Datei"
+            puts stderr "  --search TERM  Im Text nach TERM suchen + highlighten"
+            puts stderr "  --help, -h     Diese Hilfe"
+            exit 0
+        }
+        default {
+            if {[string match "--*" $_a]} {
+                puts stderr "Unbekannte Option: $_a (--help fuer Hilfe)"
+                exit 1
+            }
+            if {$::ide::cli_file eq ""} {
+                set ::ide::cli_file $_a
+            } else {
+                puts stderr "Unerwartetes Argument: $_a"
+                exit 1
+            }
+            incr _i
+        }
     }
+}
+
+# Falls Datei als Argument: laden
+if {$::ide::cli_file ne ""} {
+    if {[file exists $::ide::cli_file]} {
+        ::ide::openFile $::ide::cli_file
+    } else {
+        puts stderr "Warnung: Datei '$::ide::cli_file' nicht gefunden"
+    }
+}
+
+# Such-Term aus CLI: nach idle-Phase ausfuehren, damit UI fertig gebaut ist
+if {$::ide::cli_search ne ""} {
+    after 100 [list ::ide::doSearch $::ide::cli_search]
 }

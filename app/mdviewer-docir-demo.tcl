@@ -7,9 +7,10 @@
 #   docir     (man-viewer)  DocIR validator
 #   docir-renderer-tk       DocIR → Tk text widget
 #
-# This file is identical in both repos:
-#   man-viewer/app/mdviewer-docir-demo.tcl
-#   mdstack/demo/mdviewer-docir-demo.tcl
+# This file has a sibling in mdstack/demo/mdviewer-docir-demo.tcl
+# with similar purpose but different module-path-resolution logic
+# (mdstack version uses _paths_addRepo helpers; this version assumes
+# auto_path is already set up). The two are NOT verbatim identical.
 #
 # Setup requirement:
 #   Both man-viewer and mdstack must be reachable via auto_path
@@ -69,7 +70,7 @@ rename _paths_addRepo {}
 # ============================================================
 
 set loadErrors {}
-foreach pkg {mvdebug docir docir::rendererTk mdstack::parser docir::md} {
+foreach pkg {mvdebug docir docir::rendererTk mdstack::parser docir::mdSource docir::md} {
     if {[catch {package require $pkg} err]} {
         lappend loadErrors "package require $pkg: $err"
     }

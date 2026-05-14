@@ -1,74 +1,125 @@
 # man-viewer — Changelog
 
-## 2026-05-13 -- Migrate shared_config + tools_external to tcldocs modules
+## 2026-05-14 — `mdviewer-docir-demo`: missing `docir::mdSource` added
 
-**Affected consumers:** keine User-API-Aenderung. Install: zusaetzliche
-Dependencies `tcldocs-config 0.1` und `tcldocs-launcher 0.1` (siehe
-gleichnamige Mini-Repos im Markdown-Baum).
+### Fixed
+
+- **`app/mdviewer-docir-demo.tcl`** — the demo crashed with
+  `invalid command name "docir::md::fromAst"` because
+  `docir::mdSource` was not in the `package require` block.
+  `docir::md` is only the sink (DocIR → MD via `render`);
+  `docir::mdSource` is the source (MD-AST → DocIR via `fromAst`).
+  Both live in the same namespace but are separate packages and can
+  be loaded side by side.
+
+## 2026-05-14 — `--search` CLI + cross-app context menu (Phase 3)
+
+**Affected consumers:** UI extension, new CLI option, no API change.
+
+### Added
+
+- **CLI option `--search TERM`** — after app startup, searches the
+  current text for TERM, highlights all matches with a tag, and
+  scrolls to the first match. The status bar shows the match count.
+- **CLI option `--help`** / `-h` — brief help + exit.
+- **`::ide::doSearch term`** and **`::ide::clearSearch`** — new
+  public procs for search operations, usable from bindings or other
+  extensions.
+- **Right-click in the editor** shows a context menu:
+    - Copy, Paste, Select all
+    - "Look up in glossary" via `tcldocs::launcher` (opens
+      tcltk-glossary with `--search`)
+    - "Open in mdhelp" via `tcldocs::launcher` (if the current file
+      is `.md`, it is passed to mdhelp)
+- **macOS compatibility**: `Control-Button-1` as an additional
+  trigger for the context menu.
+
+### Changed
+
+- **argv parsing rewritten**: the positional `<file>` argument is
+  still supported, plus proper option parsing with error messages
+  on unknown options.
+
+### Examples
+
+```bash
+wish nroffide.tcl                              # as before
+wish nroffide.tcl manpage.n                    # with a file
+wish nroffide.tcl manpage.n --search foreach   # new
+wish nroffide.tcl --help                       # new
+```
+
+## 2026-05-13 — Migrate `shared_config` + `tools_external` to tcldocs modules
+
+**Affected consumers:** no user-API change. Install: additional
+dependencies `tcldocs-config 0.1` and `tcldocs-launcher 0.1` (see
+the same-named mini repositories).
 
 ### Removed
 
-- **`app/shared_config.tcl`** (132 LOC) -- identisch zu mdhelp4's
-  bisherigem File. Logik jetzt im Mini-Repo `tcldocs-config`. Wrapper
-  `::ide::loadShared` und `::ide::saveShared` (App-spezifisch) bleiben,
-  rufen jetzt `::tcldocs::getShared`/`setShared` aus dem Modul.
+- **`app/shared_config.tcl`** (132 LOC) — identical to mdhelp's
+  former file. The logic is now in the mini-repo `tcldocs-config`.
+  Wrappers `::ide::loadShared` and `::ide::saveShared` (app-specific)
+  remain and now call `::tcldocs::getShared` / `setShared` from the
+  module.
 
-- **`app/tools_external.tcl`** (279 LOC) -- identisch zu mdhelp4's
-  bisherigem File (modulo der `{*}$argResolver`-Verbesserung die in
-  man-viewer schon enthalten war). Logik jetzt im Mini-Repo
-  `tcldocs-launcher`. Procs `::tools::*` bleiben unter dem alten
-  Namespace verfuegbar, Aufrufer brauchen sich nicht anzupassen.
+- **`app/tools_external.tcl`** (279 LOC) — identical to mdhelp's
+  former file (modulo the `{*}$argResolver` improvement already
+  present in man-viewer). The logic is now in the mini-repo
+  `tcldocs-launcher`. Procedures `::tools::*` remain available
+  under the old namespace; callers need no adjustments.
 
 ### Changed
 
 - **`app/nroffide.tcl`**:
-  - Zeile 68 (`source shared_config.tcl`) -> `package require tcldocs::config`.
-  - Zeile 1342 (`source tools_external.tcl`) -> `package require tcldocs::launcher`.
+  - line 68 (`source shared_config.tcl`) → `package require tcldocs::config`.
+  - line 1342 (`source tools_external.tcl`) → `package require tcldocs::launcher`.
 
-### Hintergrund
+### Background
 
-Phase 1 + 2 der Oekosystem-Aufraeumung (siehe Top-Level `README.md`
-im Markdown-Baum). Ziel: cross-app shared settings und cross-app
-launcher als einmaliges Modul, nicht in jeder App separat.
+Phase 1 + 2 of the ecosystem cleanup. Goal: cross-app shared settings
+and cross-app launcher as a single module rather than duplicated in
+each app.
 
-## 2026-05-13 — Review-Cleanup
+## 2026-05-13 — Review cleanup
 
 ### Refactored
 
-- **`app/man-viewer.tcl` aufgeteilt.** Aus den 2167 Zeilen wurden
-  zwei thematische Module ausgelagert:
-  - `app/mv_settings.tcl` (~240 LOC) -- `showPreferences`,
+- **`app/man-viewer.tcl` split.** From its 2167 lines, two thematic
+  modules were extracted:
+  - `app/mv_settings.tcl` (~240 LOC) — `showPreferences`,
     `prefUpdatePreview`, `prefApply`, `applyFonts`, `applyTheme`.
-  - `app/mv_export.tcl` (~160 LOC) -- `exportHtml`, `exportMarkdown`,
-    `exportHtmlLinkDialog`.
+  - `app/mv_export.tcl` (~160 LOC) — `exportHtml`,
+    `exportMarkdown`, `exportHtmlLinkDialog`.
 
-  `man-viewer.tcl` jetzt 1775 LOC (-393). `source`-Statements als
-  Verkettung -- API/Verhalten unveraendert. Hintergrund: siehe
-  `reviews/2026-05-13-markdown-gesamtbegutachtung.md` Abschnitt 3.2.
+  `man-viewer.tcl` is now 1775 LOC (−393). `source` statements as a
+  chain — API/behavior unchanged. Background: see the 2026-05-13
+  review, section 3.2.
 
 ### Changed
 
-- **`app/tools_external.tcl::_launchOther`** -- expliziter
-  "trusted config only"-Kommentar und idiomatischer `{*}$argResolver`-
-  Aufruf statt `eval`. Fallback auf `eval` fuer Backward-Compat
-  mit aelterem zusammengesetztem Aufruf-Code.
-- **`bin/check-canvas.sh`** -- hardcoded `/home/greg/...`-Pfad
-  ersetzt durch `$1`-Argument oder `$CANVAS_N`-Env-Var.
-- **`man-viewer.tcl` Versions-String** auf `0.3 (DocIR hub
-  architecture)` angeglichen (war noch `0.1`, README sagte schon 0.3).
+- **`app/tools_external.tcl::_launchOther`** — explicit
+  "trusted config only" comment and idiomatic `{*}$argResolver`
+  call instead of `eval`. Fallback to `eval` for backward
+  compatibility with older composed call-site code.
+- **`bin/check-canvas.sh`** — hardcoded `/home/greg/…` path
+  replaced by a `$1` argument or `$CANVAS_N` env variable.
+- **`man-viewer.tcl` version string** aligned to
+  `0.3 (DocIR hub architecture)` (was `0.1`, the README already
+  said 0.3).
 
 ### Removed
 
-- **Muell-Datei `tests/*`** (literaler Asterisk als Dateiname,
-  34 Bytes Test-Markdown-Inhalt) entfernt -- vermutlich Resultat
-  eines verunglueckten Redirects.
+- **Stray `tests/*` file** (literal asterisk as filename,
+  34 bytes of test-Markdown content) removed — likely the result
+  of a botched redirect.
 
 ### Documentation
 
-- **`README.md`** -- `bin/`-Tabelle ergaenzt um die zwei zusaetzlichen
-  User-Converter (`n2roff`, `md2roff`) und eine Dev-Tools-Sektion
-  (`ast-diff`, `ast-validate`, `check-all-modules`, `check-tcl-syntax`,
-  `check-canvas`).
+- **`README.md`** — `bin/` table extended with the two additional
+  user-facing converters (`n2roff`, `md2roff`) and a dev-tools
+  section (`ast-diff`, `ast-validate`, `check-all-modules`,
+  `check-tcl-syntax`, `check-canvas`).
 
 ## 2026-05-08 — nroffide added: nroff IDE with debugger
 
