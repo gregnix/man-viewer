@@ -247,6 +247,4 @@ fi
 
 ## Siehe auch
 
-- [Debug-System](../doc/DEBUG-SYSTEM.md) - Debug-Tools Dokumentation
 - [AST-Spezifikation](../doc/AST-SPEC.md) - AST-Struktur
-- [Fehlerbehebung](../doc/debugging-troubleshooting.md) - Debugging-Techniken

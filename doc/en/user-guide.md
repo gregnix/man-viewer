@@ -226,6 +226,5 @@ Check parser warnings via Menu → Help → Warnings.
 ## See also
 
 - [Supported Macros](SUPPORTED-MACROS.md)
-- [Technical Documentation](technical.md)
 - [AST Specification](AST-SPEC.md)
 - [Changelog](../CHANGES.md)

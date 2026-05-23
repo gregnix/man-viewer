@@ -457,7 +457,6 @@ The following macros are currently **not** supported:
 - `.de` - Define Macro
 - `.am` - Append Macro
 
-See [missing-features-complete.md](missing-features-complete.md) for details.
 
 ---
 
@@ -578,12 +577,3 @@ WIDGET-SPECIFIC OPTIONS
 
       .c create rectangle 0 0 100 100
 ```
-
----
-
-## See also
-
-- [Implemented Features](implemented-features.md) - Detailed description
-- [Technical Documentation](technical.md) - Architecture and API
-- [Missing Features](missing-features-complete.md) - What's still missing
-- [Next Steps](../NEXT-STEPS.md) - Roadmap
