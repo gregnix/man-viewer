@@ -54,7 +54,7 @@ _paths_addRepo [list \
     [file normalize ~/lib/tcltk/docir/lib/tm] \
     [file normalize ~/lib/tcltk/docir] \
     [file join $projectRoot .. docir lib tm]] \
-    docir-0.1.tm
+    docir-0.1.1.tm
 
 _paths_addRepo [list \
     [file normalize ~/lib/tcltk/mdstack/lib] \
