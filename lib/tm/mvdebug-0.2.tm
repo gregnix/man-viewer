@@ -375,7 +375,7 @@ proc debug::ast::_formatContent {content prefix} {
             # List of inline nodes
             set parts {}
             foreach inline $content {
-                set t [expr {[dict exists $inline type] ? [dict get $inline type] : "?"}]
+                set t [if {[dict exists $inline type]} {dict get $inline type} else {lindex "?"}]
                 set v ""
                 if {[dict exists $inline text]} {
                     set v [dict get $inline text]

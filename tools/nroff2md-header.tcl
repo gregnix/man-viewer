@@ -1,14 +1,20 @@
 #!/usr/bin/env tclsh
 # nroff2md.tcl -- standalone nroff/man-page to Markdown converter
 #
-# Version:  0.2
-# Requires: Tcl 8.6+
+# Version:  0.3
+# Requires: Tcl 8.6+ (also 9.0)
 # Source:   https://github.com/gregnix/man-viewer
 #
-# Embedded modules:
-#   nroffparser-0.2  -- nroff parser (AST v1)
-#   ast2md-0.1       -- AST to Markdown renderer
-#   debug-0.2        -- debug/trace toolkit
+# Same pipeline as man-viewer/bin/n2md, in one file, without installed
+# modules: nroff -> nroffparser (AST) -> docir::roff (DocIR) -> docir::md.
+#
+# Embedded modules (built by tools/build-nroff2md.tcl, do not edit here):
+#   mvdebug-0.2          -- debug/trace toolkit      (man-viewer)
+#   nroffparser-0.2      -- nroff parser (AST v1)    (man-viewer)
+#   docir-0.1.1          -- DocIR core               (docir)
+#   docir::roffSource    -- AST -> DocIR             (docir)
+#   docir::md            -- DocIR -> Markdown        (docir)
+#   n2md::tip700         -- TIP-700 Markdown         (man-viewer)
 #
 # Copyright (c) 2026 Gregor Ebbing <gregnix@github>
 # All rights reserved.
@@ -41,9 +47,8 @@
 # Usage (run --help for full option list):
 #   tclsh nroff2md.tcl input.n                    # to stdout
 #   tclsh nroff2md.tcl input.n output.md          # to file
-#   tclsh nroff2md.tcl input.n -lang tcl          # code block language
+#   tclsh nroff2md.tcl --tip700 input.n           # TIP-700 (as man2markdown)
 #   tclsh nroff2md.tcl --linkmode file input.n    # SEE ALSO -> .md links
-#   tclsh nroff2md.tcl --tip700 input.n           # TIP-700 spans in SYNOPSIS
 #   tclsh nroff2md.tcl --batch dir/ outdir/       # batch convert (recursive)
 #   tclsh nroff2md.tcl --batch dir/ outdir/ --no-index  # without index.md
 #   cat input.n | tclsh nroff2md.tcl -            # from stdin

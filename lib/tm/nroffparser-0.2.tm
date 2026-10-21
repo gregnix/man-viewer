@@ -373,9 +373,11 @@ proc nroffparser::parseLines {lines {sourceFile ""}} {
         
         # Remove comments
         # Pattern 1: .\" at start (standard nroff comment)
-        if {[string match ".\\\"*" $line]} { continue }
         # Pattern 2: \" at start (nroff comment)
-        if {[string match "\\\"*" $line]} { continue }
+        # Bis 2026-10-21 mit [string match "\\\"*"]: im Muster ist \" nur
+        # ein maskiertes ", es traf also Textzeilen, die mit " beginnen --
+        # in http.n verschwand '"status code" that are defined ...'.
+        if {[regexp {^\.?\\"} $line]} { continue }
         # Pattern 3: '\" at start (man page comment with single quote)
         if {[regexp {^'\\"} $line]} { continue }
         # Pattern 4: Check for '\" at start (alternative pattern)
@@ -435,6 +437,22 @@ proc nroffparser::parseBlocks {lines} {
         # Check if this is already a blank node (from parseLines)
         if {[string is list $line] && [llength $line] > 0} {
             if {[catch {dict get $line type} type] == 0 && $type eq "blank"} {
+                # In .nf/.CS ist die Leerzeile Teil des Codes. Bis
+                # 2026-10-21 ging sie verloren: jedes Beispiel mit
+                # Leerzeilen kam zusammengeschoben heraus.
+                if {[dict get $state mode] eq "pre"} {
+                    set preText [dict get $state preText]
+                    if {$preText ne ""} {
+                        dict set state preText "$preText\n"
+                    }
+                    continue
+                }
+                # Leerzeile im Fliesstext: nroff beginnt einen neuen Absatz
+                # (bis 2026-10-21 liefen beide Absaetze zusammen, und der
+                # blank-Knoten stand VOR dem noch offenen Absatz)
+                if {![llength [dict get $state currentList]]} {
+                    set state [nroffparser::flushParagraph $state]
+                }
                 # This is a blank node - add directly to AST
                 set ast [dict get $state ast]
                 lappend ast $line
@@ -512,10 +530,23 @@ proc nroffparser::handleLine {state line} {
                 dict set state mode normal
                 return [nroffparser::handleMacro $state $line]
             }
-            # Also recognize .sp in pre mode (it should create blank lines)
+            # .br in einem .nf-Block: Zeilen bleiben ohnehin getrennt.
+            # Vorher landete ".br" als Text im Block (ttk_notebook.n,
+            # ttk_panedwindow.n: SYNOPSIS mit .nf und .br).
+            if {$macro eq ".br"} {
+                return $state
+            }
+            # .sp im Block: Leerzeile im Code (bis 2026-10-21 ein
+            # blank-Knoten im AST VOR dem noch offenen Block)
             if {$macro eq ".sp"} {
                 debug::traceMacro $macro "in pre mode"
-                return [nroffparser::handleMacro $state $line]
+                set preText [dict get $state preText]
+                if {$preText ne ""} { dict set state preText "$preText\n" }
+                return $state
+            }
+            # .VS im Block (library.n: Uebersicht) -- vorher Text im Code
+            if {$macro eq ".VS"} {
+                return [nroffparser::handleVS $state [string trim [string range $line 3 end]]]
             }
             # Also recognize .ta in pre mode (it sets tab stops for following lines)
             if {$macro eq ".ta"} {
@@ -557,12 +588,7 @@ proc nroffparser::handleMacro {state line} {
                 return $state
             }
             # Add period to current paragraph
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph "."
-            } else {
-                dict set state currentParagraph "$cur ."
-            }
+            set state [nroffparser::appendInline $state "."]
             return $state
         }
         .TH {
@@ -648,6 +674,12 @@ proc nroffparser::handleMacro {state line} {
         .RS {
             # Relative start: aktuellen List-Kontext auf Stack sichern
             set state [nroffparser::flushParagraph $state]
+            # Die aeussere Liste jetzt ausgeben. Bis 2026-10-21 blieb sie
+            # bis .RE offen und kam erst NACH allem Eingerueckten in den
+            # AST: in Tcl.n stand die Tabelle der Backslash-Folgen vor
+            # "[1] Commands." (gemessen mit n2md). Text nach .RE wird ein
+            # eigener Absatz auf der aeusseren Ebene.
+            set state [nroffparser::flushList $state]
             set indentLevel [dict get $state indentLevel]
             # Stack-Frame mit aktuellem Kontext
             set frame [dict create \
@@ -796,12 +828,7 @@ proc nroffparser::handleMacro {state line} {
             }
             
             # Add to current paragraph
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph $underlineText
-            } else {
-                dict set state currentParagraph "$cur $underlineText"
-            }
+            set state [nroffparser::appendInline $state $underlineText]
             return $state
         }
         .UR {
@@ -827,12 +854,7 @@ proc nroffparser::handleMacro {state line} {
             # an eine pendingInlines-Liste.
             # Einfachste Lösung: URL-Link als Text-Markierung einfügen
             set linkMark "\[ur|$href|$urText\]"
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph $linkMark
-            } else {
-                dict set state currentParagraph "$cur $linkMark"
-            }
+            set state [nroffparser::appendInline $state $linkMark]
             if {$punct ne ""} {
                 dict set state currentParagraph                     "[dict get $state currentParagraph]$punct"
             }
@@ -844,12 +866,7 @@ proc nroffparser::handleMacro {state line} {
         .MT {
             # Manual Title - empty string, just calls .QW ""
             # Don't flush paragraph - .MT adds to current paragraph
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph "\"\""
-            } else {
-                dict set state currentParagraph "$cur \"\""
-            }
+            set state [nroffparser::appendInline $state "\"\""]
             return $state
         }
         .SO {
@@ -866,182 +883,35 @@ proc nroffparser::handleMacro {state line} {
             # Quote word: .QW arg1 ?arg2?
             # Print arg1 in quotes, then arg2 normally (for trailing punctuation)
             # Don't flush paragraph - .QW adds to current paragraph
-            
-            # Parse arguments - handle quoted strings properly
-            set arg1 ""
-            set arg2 ""
-            set inQuotes 0
-            set current ""
-            set len [string length $rest]
-            
-            for {set i 0} {$i < $len} {incr i} {
-                set char [string index $rest $i]
-                if {$char eq "\""} {
-                    if {$inQuotes} {
-                        # End of quoted string
-                        set arg1 $current
-                        set current ""
-                        set inQuotes 0
-                    } else {
-                        # Start of quoted string
-                        set inQuotes 1
-                    }
-                } elseif {$char eq " " && !$inQuotes && $arg1 ne ""} {
-                    # Space outside quotes - start arg2
-                    set arg2 [string trim [string range $rest [expr {$i + 1}] end]]
-                    break
-                } else {
-                    append current $char
-                }
-            }
-            
-            # If we're still in quotes, arg1 is current
-            if {$inQuotes && $arg1 eq ""} {
-                set arg1 $current
-            }
-            
-            # Remove outer quotes from arg1 if present (they'll be added back)
-            set arg1 [string trim $arg1 "\""]
-            
-            # Create quoted text: "arg1" arg2
-            set quotedText "\"$arg1\""
-            if {$arg2 ne ""} {
-                append quotedText " $arg2"
-            }
+            #
+            # Argumente wie nroff: "..." oder ein Wort. Vorher wurde arg1
+            # nur bei Anfuehrungszeichen gesetzt; ".QW inside" ergab "".
+            set qwArgs [nroffparser::macroArgs $rest]
+            set arg1 [lindex $qwArgs 0]
+            set arg2 [join [lrange $qwArgs 1 end] " "]
+
+            # "arg1"arg2 -- ohne Leerzeichen, wie man.macros (\$1''\$2):
+            # arg2 ist meist ein Satzzeichen
+            set quotedText "\"$arg1\"$arg2"
             
             # Add to current paragraph
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph $quotedText
-            } else {
-                dict set state currentParagraph "$cur $quotedText"
-            }
+            set state [nroffparser::appendInline $state $quotedText]
             return $state
         }
         .PQ {
-            # Parenthesized quote: .PQ arg1 ?arg2? ?arg3?
-            # Print (arg1 in quotes arg2) arg3
-            # Don't flush paragraph - .PQ adds to current paragraph
-            
-            # Parse similar to .QW
-            set arg1 ""
-            set arg2 ""
-            set arg3 ""
-            set inQuotes 0
-            set current ""
-            set len [string length $rest]
-            set argNum 1
-            
-            for {set i 0} {$i < $len} {incr i} {
-                set char [string index $rest $i]
-                if {$char eq "\""} {
-                    if {$inQuotes} {
-                        if {$argNum == 1} {
-                            set arg1 $current
-                        } elseif {$argNum == 2} {
-                            set arg2 $current
-                        }
-                        set current ""
-                        set inQuotes 0
-                        incr argNum
-                    } else {
-                        set inQuotes 1
-                    }
-                } elseif {$char eq " " && !$inQuotes} {
-                    if {$current ne ""} {
-                        if {$argNum == 1 && $arg1 eq ""} {
-                            set arg1 $current
-                        } elseif {$argNum == 2 && $arg2 eq ""} {
-                            set arg2 $current
-                        } elseif {$argNum == 3} {
-                            set arg3 $current
-                        }
-                        set current ""
-                        incr argNum
-                    }
-                } else {
-                    append current $char
-                }
-            }
-            
-            if {$current ne ""} {
-                if {$argNum == 1} {
-                    set arg1 $current
-                } elseif {$argNum == 2} {
-                    set arg2 $current
-                } else {
-                    set arg3 $current
-                }
-            }
-            
-            set arg1 [string trim $arg1 "\""]
-            set quotedText "(\"$arg1\""
-            if {$arg2 ne ""} {
-                append quotedText " $arg2"
-            }
-            append quotedText ")"
-            if {$arg3 ne ""} {
-                append quotedText " $arg3"
-            }
-            
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph $quotedText
-            } else {
-                dict set state currentParagraph "$cur $quotedText"
-            }
+            # Parenthesized quote: .PQ arg1 ?arg2? ?arg3? -> ("arg1"arg2)arg3
+            # (man.macros, ohne Leerzeichen)
+            lassign [nroffparser::macroArgs $rest] arg1 arg2 arg3
+            set quotedText "(\"$arg1\"$arg2)$arg3"
+            set state [nroffparser::appendInline $state $quotedText]
             return $state
         }
         .QR {
-            # Quoted range: .QR arg1 arg2 ?arg3?
-            # Print "arg1" - "arg2" arg3
-            # Don't flush paragraph - .QR adds to current paragraph
-            
-            # Parse two quoted arguments
-            set arg1 ""
-            set arg2 ""
-            set arg3 ""
-            set inQuotes 0
-            set current ""
-            set len [string length $rest]
-            set argNum 1
-            
-            for {set i 0} {$i < $len} {incr i} {
-                set char [string index $rest $i]
-                if {$char eq "\""} {
-                    if {$inQuotes} {
-                        if {$argNum == 1} {
-                            set arg1 $current
-                        } elseif {$argNum == 2} {
-                            set arg2 $current
-                        }
-                        set current ""
-                        set inQuotes 0
-                        incr argNum
-                    } else {
-                        set inQuotes 1
-                    }
-                } elseif {$char eq " " && !$inQuotes && $argNum > 2} {
-                    set arg3 [string trim [string range $rest [expr {$i + 1}] end]]
-                    break
-                } elseif {$char ne " " || $inQuotes} {
-                    append current $char
-                }
-            }
-            
-            set arg1 [string trim $arg1 "\""]
-            set arg2 [string trim $arg2 "\""]
-            set quotedText "\"$arg1\" - \"$arg2\""
-            if {$arg3 ne ""} {
-                append quotedText " $arg3"
-            }
-            
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph $quotedText
-            } else {
-                dict set state currentParagraph "$cur $quotedText"
-            }
+            # Quoted range: .QR arg1 arg2 ?arg3? -> "arg1"-"arg2"arg3
+            # (man.macros: \-, ohne Leerzeichen)
+            lassign [nroffparser::macroArgs $rest] arg1 arg2 arg3
+            set quotedText "\"$arg1\"-\"$arg2\"$arg3"
+            set state [nroffparser::appendInline $state $quotedText]
             return $state
         }
         default {
@@ -1050,6 +920,53 @@ proc nroffparser::handleMacro {state line} {
         }
     }
     
+    return $state
+}
+
+# Argumente einer Makrozeile wie nroff: "..." (Anfuehrung, auch leer) oder Wort.
+proc nroffparser::macroArgs {rest} {
+    set out {}
+    foreach {- q w} [regexp -all -inline {"([^"]*)"?|(\S+)} $rest] {
+        if {$w ne ""} { lappend out $w } else { lappend out $q }
+    }
+    return $out
+}
+
+# Inline-Text eines Makros (.QW, .PQ, .QR, .MT, ".", .UL, .UR) an die
+# Stelle haengen, an die auch eine normale Textzeile ginge: in eine offene
+# Liste die Beschreibung des letzten Eintrags, sonst den Absatz.
+# Vorher gingen diese Makros immer in currentParagraph. In einer .OP- oder
+# .IP-Liste stand der Text dann nicht in der Beschreibung, und
+# flushParagraph uebernahm ihn nur fuer .TP-Listen: aus
+#   must be to an item before it is considered to be
+#   .QW inside
+#   the item.
+# wurde "... considered to be the item." (canvas.n, gemessen 2026-10-21).
+proc nroffparser::appendInline {state text} {
+    set currentList [dict get $state currentList]
+    if {[llength $currentList] > 0
+            && !([dict exists $state waitingForTerm] && [dict get $state waitingForTerm])
+            && [dict get $state currentParagraph] eq ""} {
+        set lastIdx [expr {[llength $currentList] - 1}]
+        set lastItem [lindex $currentList $lastIdx]
+        set desc [dict get $lastItem desc]
+        if {$desc eq ""} {
+            dict set lastItem desc $text
+        } elseif {[string match {[.,;:!?)]*} $text]} {
+            dict set lastItem desc "$desc$text"
+        } else {
+            dict set lastItem desc "$desc $text"
+        }
+        lset currentList $lastIdx $lastItem
+        dict set state currentList $currentList
+        return $state
+    }
+    set cur [dict get $state currentParagraph]
+    if {$cur eq ""} {
+        dict set state currentParagraph $text
+    } else {
+        dict set state currentParagraph "$cur $text"
+    }
     return $state
 }
 
@@ -1277,6 +1194,14 @@ proc nroffparser::handleVS {state rest} {
         set version [string trim $rest "\""]
     }
     
+    # Ausserhalb einer Liste beginnt mit .VS ein neuer Absatz: Absaetze
+    # im Block bekommen meta.version (TIP 700: ::: {.info -version="..."}).
+    # In einer Listenbeschreibung bleibt der Text zusammen (wie
+    # man2markdown, das dort keine Markierung setzt).
+    if {![llength [dict get $state currentList]]} {
+        set state [nroffparser::flushParagraph $state]
+    }
+
     # Mark that we're in a VS block
     dict set state inVSBlock 1
     dict set state vsVersion $version
@@ -1303,6 +1228,10 @@ proc nroffparser::handleVE {state rest} {
         return $state
     }
     
+    if {![llength [dict get $state currentList]]} {
+        set state [nroffparser::flushParagraph $state]
+    }
+
     # End VS block
     dict set state inVSBlock 0
     dict set state vsVersion ""
@@ -1544,12 +1473,7 @@ proc nroffparser::handleText {state line} {
         set cur [dict get $state urText]
         dict set state urText [expr {$cur eq "" ? $line : "$cur $line"}]
     } else {
-        set cur [dict get $state currentParagraph]
-        if {$cur eq ""} {
-            dict set state currentParagraph $line
-        } else {
-            dict set state currentParagraph "$cur $line"
-        }
+        set state [nroffparser::appendInline $state $line]
     }
     
     return $state
@@ -1634,6 +1558,11 @@ proc nroffparser::flushParagraph {state} {
                 dict set meta indentLevel $indentLevel
             }
         }
+        # Absatz zwischen .VS und .VE: Versionsangabe ("8.7", "TIP508",
+        # auch leer)
+        if {[dict exists $state inVSBlock] && [dict get $state inVSBlock]} {
+            dict set meta version [dict get $state vsVersion]
+        }
         set state [nroffparser::appendNode $state paragraph $text $meta]
         dict set state currentParagraph ""
     }
@@ -1641,7 +1570,8 @@ proc nroffparser::flushParagraph {state} {
 }
 
 proc nroffparser::flushPre {state} {
-    set text [dict get $state preText]
+    # Leerzeilen am Ende des Blocks (vor .CE/.fi) gehoeren nicht zum Code
+    set text [string trimright [dict get $state preText] \n]
     if {$text ne ""} {
         # AST-Spec: pre node
         set state [nroffparser::appendNode $state pre $text {}]
@@ -1877,6 +1807,36 @@ proc nroffparser::detectLinks {inlines} {
 #   Also handles escape sequences: \-, \., \e, etc.
 #   Removes inline comments: .\" ... (but not at start of line - handled earlier)
 #   Returns list of inline AST nodes: {type text|strong|emphasis text "..."}
+# Ein Text-Inline in der aktuellen Schrift (bold/italic/normal).
+proc nroffparser::styled {style txt} {
+    switch -- $style {
+        bold    { return [dict create type strong text $txt] }
+        italic  { return [dict create type emphasis text $txt] }
+        default { return [dict create type text text $txt] }
+    }
+}
+
+# Benachbarte Inlines gleicher Art (text/strong/emphasis) zusammenlegen.
+# Sonst wird "\fB\-global\fR" zu zwei strong-Knoten, und Markdown
+# bekommt "**-****global**".
+proc nroffparser::mergeInlines {inlines} {
+    set out {}
+    foreach i $inlines {
+        set t [dict get $i type]
+        if {[llength $out] && $t in {text strong emphasis}
+                && [dict size $i] == 2 && [dict exists $i text]} {
+            set last [lindex $out end]
+            if {[dict get $last type] eq $t && [dict size $last] == 2} {
+                dict append last text [dict get $i text]
+                lset out end $last
+                continue
+            }
+        }
+        lappend out $i
+    }
+    return $out
+}
+
 proc nroffparser::parseInlines {text} {
     # Remove inline comments (.\" ...) but preserve escape sequences
     # Pattern: .\" followed by anything until end of line
@@ -2067,18 +2027,21 @@ proc nroffparser::parseInlines {text} {
                     }
                 }
                 - {
-                    # Hyphen/minus: \-
-                    lappend inlines [dict create type text text "-"]
+                    # Hyphen/minus: \- -- in der aktuellen Schrift. Vorher
+                    # immer normal: "\fB\-global\fR" ergab "-**global**".
+                    lappend inlines [nroffparser::styled $currentStyle "-"]
                     set pos [expr {$escapeEnd + 1}]
                 }
                 . {
                     # Period: \.
-                    lappend inlines [dict create type text text "."]
+                    lappend inlines [nroffparser::styled $currentStyle "."]
                     set pos [expr {$escapeEnd + 1}]
                 }
                 e {
-                    # Escape character: \e (usually ignored or treated as space)
-                    # In man pages, \e is often used for line continuation
+                    # \e druckt das Escape-Zeichen, also "\" (groff: \e).
+                    # Die Tcl-Handbuchseiten schreiben so jeden Backslash im
+                    # Text ("\en", "\e\e"). Vorher wurde \e verworfen.
+                    lappend inlines [nroffparser::styled $currentStyle "\\"]
                     set pos [expr {$escapeEnd + 1}]
                 }
                 & {
@@ -2128,7 +2091,7 @@ proc nroffparser::parseInlines {text} {
                 }
                 \\ {
                     # Literal backslash: \\
-                    lappend inlines [dict create type text text "\\"]
+                    lappend inlines [nroffparser::styled $currentStyle "\\"]
                     set pos [expr {$escapeEnd + 1}]
                 }
                 ( {
@@ -2164,6 +2127,7 @@ proc nroffparser::parseInlines {text} {
     if {[llength $inlines] == 0 && $text ne ""} {
         lappend inlines [dict create type text text $text]
     }
+    set inlines [nroffparser::mergeInlines $inlines]
     
     return $inlines
 }

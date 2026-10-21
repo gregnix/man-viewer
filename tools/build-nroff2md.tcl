@@ -2,17 +2,29 @@
 # build-nroff2md.tcl -- Baut nroff2md.tcl aus den Quell-Modulen zusammen
 #
 # Struktur des erzeugten nroff2md.tcl:
-#   nroff2md-header.tcl         Lizenz, Usage, package require
-#   EMBEDDED: mvdebug-0.2.tm      Debug-Toolkit
-#   EMBEDDED: nroffparser-0.2.tm  nroff-Parser
-#   EMBEDDED: ast2md-0.1.tm     AST -> Markdown Renderer
-#   nroff2md-main.tcl           CLI-Argument-Handling
+#   nroff2md-header.tcl                Lizenz, Usage, package require
+#   EMBEDDED: mvdebug-0.2.tm           Debug-Toolkit          (man-viewer)
+#   EMBEDDED: nroffparser-0.2.tm       nroff-Parser           (man-viewer)
+#   EMBEDDED: docir-0.1.1.tm           DocIR-Kern             (docir)
+#   EMBEDDED: docir/roffSource-0.1.tm  AST -> DocIR           (docir)
+#   EMBEDDED: docir/md-0.1.tm          DocIR -> Markdown      (docir)
+#   EMBEDDED: n2md/tip700-0.1.tm       TIP-700-Markdown       (man-viewer)
+#   nroff2md-main.tcl                  CLI-Argument-Handling
+#
+# Bis 2026-10-21 bettete es ast2md-0.1.tm ein, das seit dem Umbau auf
+# DocIR (Mai 2026) geloescht ist -- nroff2md.tcl liess sich nicht mehr
+# bauen und blieb auf dem Stand vom Maerz.
+#
+# Die "package provide"-Zeilen bleiben stehen: tip700 ruft
+# "package require docir::md", roffSource "package require docir".
 #
 # Usage:
-#   tclsh tools/build-nroff2md.tcl
-#   tclsh tools/build-nroff2md.tcl --check   (nur prüfen, nicht schreiben)
+#   tclsh tools/build-nroff2md.tcl ?--docir DIR? ?--check?
+#     --docir DIR   docir/lib/tm (sonst $DOCIR oder ../docir/lib/tm)
+#     --check       nur prüfen, nicht schreiben
 #
-# Quellen: lib/tm/*.tm, tools/nroff2md-header.tcl, tools/nroff2md-main.tcl
+# Quellen: lib/tm/*, docir/lib/tm/*, tools/nroff2md-header.tcl,
+#          tools/nroff2md-main.tcl
 # Ziel:    tools/nroff2md.tcl
 
 set scriptDir  [file dirname [file normalize [info script]]]
@@ -24,16 +36,27 @@ set mainFile   [file join $scriptDir nroff2md-main.tcl]
 
 # -- Argumente --
 set checkOnly 0
-foreach arg $argv {
-    if {$arg eq "--check"} { set checkOnly 1 }
+set docirDir ""
+if {[info exists ::env(DOCIR)]} { set docirDir $::env(DOCIR) }
+for {set i 0} {$i < [llength $argv]} {incr i} {
+    switch -- [lindex $argv $i] {
+        --check { set checkOnly 1 }
+        --docir { incr i; set docirDir [lindex $argv $i] }
+    }
 }
+if {$docirDir eq ""} {
+    set docirDir [file join [file dirname $projectDir] docir lib tm]
+}
+set docirDir [file normalize $docirDir]
 
-# -- Module in Reihenfolge --
-set modules {
-    mvdebug-0.2.tm
-    nroffparser-0.2.tm
-    ast2md-0.1.tm
-}
+# -- Module in Reihenfolge: {Wurzel relativer-Pfad} --
+set modules [list \
+    [list $libDir   mvdebug-0.2.tm] \
+    [list $libDir   nroffparser-0.2.tm] \
+    [list $docirDir docir-0.1.1.tm] \
+    [list $docirDir docir/roffSource-0.1.tm] \
+    [list $docirDir docir/md-0.1.tm] \
+    [list $libDir   n2md/tip700-0.1.tm]]
 
 # -- Hilfsproc: Modul-Inhalt für Einbettung aufbereiten --
 proc embedModule {path name} {
@@ -41,9 +64,6 @@ proc embedModule {path name} {
     fconfigure $fh -encoding utf-8
     set content [read $fh]
     close $fh
-
-    # package provide Zeile entfernen (im standalone nicht gebraucht)
-    regsub -line {^package provide [^\n]+\n} $content {} content
 
     # Führende Leerzeilen trimmen
     set content [string trimleft $content "\n"]
@@ -70,9 +90,11 @@ foreach f [list $headerFile $mainFile] {
     }
 }
 foreach mod $modules {
-    set path [file join $libDir $mod]
+    lassign $mod root name
+    set path [file join $root $name]
     if {![file exists $path]} {
-        puts stderr "FEHLER: $mod nicht gefunden: $path"
+        puts stderr "FEHLER: $name nicht gefunden: $path"
+        puts stderr "        docir-Pfad mit --docir DIR oder DOCIR=DIR angeben"
         exit 1
     }
 }
@@ -84,8 +106,8 @@ lappend parts [readFile $headerFile]
 lappend parts ""
 
 foreach mod $modules {
-    set path [file join $libDir $mod]
-    lappend parts [embedModule $path $mod]
+    lassign $mod root name
+    lappend parts [embedModule [file join $root $name] $name]
 }
 
 lappend parts [readFile $mainFile]
@@ -125,8 +147,8 @@ set totalLines [llength [split $newContent "\n"]]
 puts "Geschrieben: [file tail $outFile] ($totalLines Zeilen)"
 puts ""
 foreach mod $modules {
-    set path [file join $libDir $mod]
-    set lines [llength [split [readFile $path] "\n"]]
-    puts "  [format %-30s $mod] $lines Zeilen"
+    lassign $mod root name
+    set lines [llength [split [readFile [file join $root $name]] "\n"]]
+    puts "  [format %-30s $name] $lines Zeilen"
 }
 

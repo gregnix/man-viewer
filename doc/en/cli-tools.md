@@ -8,7 +8,7 @@ die DocIR-Pipeline aus dem [docir-Repo](../../../docir/).
 | Tool     | Output    | DocIR-Senke         | Spezielle Optionen                        |
 |----------|-----------|---------------------|-------------------------------------------|
 | `n2html` | HTML      | `docir::html`        | `--theme`, `--lang`, `--link-mode`, `--toc` |
-| `n2md`   | Markdown  | `docir::md`          | (keine — Default-Optionen sind passend)   |
+| `n2md`   | Markdown  | `docir::md`          | `--tip700`, `--batch DIR OUT`             |
 | `n2pdf`  | PDF       | `docir::pdf`         | `--paper a4|letter` (braucht pdf4tcl)     |
 | `n2svg`  | SVG       | `docir::svg`         | (foreignObject-Modus default)             |
 | `n2txt`  | Plain text| **keine** (direkt AST) | minimaler Debug-/Plain-Renderer        |
@@ -66,7 +66,37 @@ n2md update.n update.md
 
 DocIR-Pipeline mit Auto-Heading-Shift (TH wird h1, .SH wird h2),
 GFM-kompatible Tabellen mit Pseudo-Header, Code-Inlines mit
-Doppel-Backtick-Escape bei Bedarf.
+Doppel-Backtick-Escape bei Bedarf. `.TP`/`.IP`/`.OP`-Listen werden
+Definitionslisten (`Begriff` / `: Beschreibung`, immer ab Spalte 0).
+
+```bash
+n2md --tip700 after.n after.md
+n2md --batch doc/ md/ --tip700
+```
+
+`--tip700` schreibt das Format von `man2markdown.tcl` (TIP 700), wie es
+tcltk-manual-de fuer en-markdown/de-markdown benutzt (Modul
+`lib/tm/n2md/tip700-0.1.tm`):
+
+- YAML-Kopf `CommandName`, `ManualSection`, `Version`, `TclPart`,
+  `TclDescription` (aus `.TH`), `Links` (SEE ALSO), `Keywords`
+  (KEYWORDS), `Copyright` (Kommentarzeilen); SEE ALSO und KEYWORDS
+  stehen nicht mehr im Text
+- `# Name`, `# Synopsis`, `## Unterabschnitt` (erster Buchstabe gross)
+- Uebersicht als `::: {.synopsis} :::` mit Spans `.cmd` `.sub` `.lit`
+  `.ins` `.arg` `.optarg` `.optlit` `.optdot`
+- Absaetze zwischen `.VS`/`.VE` als `::: {.info -version="..."}`
+- `.OP` als `**-opt** (**dbName**/**dbClass**)`, zwei Begriffe mit
+  einer Beschreibung: `: ...see next...`
+
+Gemessen an Tcl 9.0.5 und Tk 9.0 (231 Seiten): alle Seiten
+umgewandelt (man2markdown: 213, Rest per pandoc). Auf den 213 Seiten
+gleicher YAML-Kopf bei 211, gleiche Uebersicht bei 182 (Rest:
+man2markdown verliert Woerter wie `-server`, `readable`, `image`),
+gleiche Ueberschriften bei 211; 141 von 292 497 Woertern fehlen, fast
+alle sind `\(bu`/`\(34`/`\(en`, die man2markdown roh stehen laesst.
+
+Exit-Status 1, wenn eine Seite nicht umgewandelt werden konnte.
 
 ### n2pdf
 
@@ -112,5 +142,12 @@ Mit DocIR-Hub (Mai 2026):
 - Alle CLIs (außer n2txt) gehen über DocIR
 - Renderer sind in `docir-FORMAT`-Modulen wiederverwendbar
 - mvmantohtml und ast2md wurden ersatzlos gelöscht
-- Standalone-Single-File-Distribution (`tools/nroff2md.tcl`) müsste
-  bei Bedarf separat auf DocIR umgestellt werden
+- Standalone-Single-File-Distribution (`tools/nroff2md.tcl`): seit
+  2026-10-21 auch über DocIR, gleiche Ausgabe wie `n2md` (inkl.
+  `--tip700`). Neu bauen nach Änderungen an nroffparser, docir::md
+  oder n2md::tip700:
+
+  ```bash
+  tclsh tools/build-nroff2md.tcl [--docir ../docir/lib/tm]
+  tclsh tools/build-nroff2md.tcl --check    # Exit 1, wenn veraltet
+  ```

@@ -5,9 +5,11 @@ proc usage {} {
     puts "Usage: nroff2md.tcl \[input.n\] \[output.md\] \[options\]"
     puts ""
     puts "Options:"
-    puts "  -lang LANG           Code block language (default: tcl)"
-    puts "  --linkmode MODE      Link mode: none, server, file"
-    puts "  --tip700             Emit TIP-700 bracketed_spans in SYNOPSIS"
+    puts "  --tip700             TIP-700 format as man2markdown.tcl: YAML head,"
+    puts "                       ::: {.synopsis} ::: with spans, SEE ALSO and"
+    puts "                       KEYWORDS in the head"
+    puts "  --linkmode MODE      Link mode: none, server, file (not with --tip700)"
+    puts "  -lang LANG           accepted, ignored (code blocks have no language)"
     puts "  --batch DIR OUT      Convert all .n/.3 files in DIR to OUT/"
     puts "  --no-index           Skip index.md generation in batch mode"
     puts "  --help               Show this help"
@@ -18,8 +20,18 @@ proc usage {} {
     puts "  file     SEE ALSO as pagename.md (relative file links)"
 }
 
+# SEE ALSO links: none -> plain text, server -> /name, file -> name.md
+proc linkTarget {mode name section} {
+    switch -- $mode {
+        server  { return "/$name" }
+        file    { return "$name.md" }
+        default { return "" }
+    }
+}
+
 proc convertFile {inputFile outputFile lang linkmode {indexLink ""} {tip700 false}} {
     if {$inputFile eq "-"} {
+        fconfigure stdin -encoding utf-8
         set nroff [read stdin]
         set sourceFile ""
     } else {
@@ -36,25 +48,28 @@ proc convertFile {inputFile outputFile lang linkmode {indexLink ""} {tip700 fals
 
     if {[catch {
         set ast [nroffparser::parse $nroff $sourceFile]
-        set md  [ast2md::render $ast -lang $lang -linkmode $linkmode -tip700 $tip700]
+        set ir  [docir::roff::fromAst $ast]
+        if {$tip700} {
+            set md [n2md::tip700::render $nroff $ir]
+        } else {
+            set md [docir::md::render $ir [list linkResolve [list linkTarget $linkmode]]]
+        }
     } err]} {
         puts stderr "Error converting $inputFile: $err"
         return {0 {}}
     }
 
-    # Metadaten aus dem TH-Node (level=0 heading)
+    # Metadaten (name, section) aus doc_header fuer index.md
     set meta {}
-    foreach node $ast {
-        if {[dict get $node type] eq "heading"} {
-            set m [dict get $node meta]
-            if {[dict exists $m level] && [dict get $m level] == 0} {
-                set meta $m
-                break
-            }
+    foreach node $ir {
+        if {[dict get $node type] eq "doc_header"} {
+            set meta [dict get $node meta]
+            break
         }
     }
 
     if {$outputFile eq ""} {
+        fconfigure stdout -encoding utf-8
         puts -nonewline $md
     } else {
         file mkdir [file dirname $outputFile]
@@ -176,7 +191,7 @@ proc batchConvert {inputDir outputDir lang linkmode noIndex {tip700 false}} {
     set files [findNroffFiles $inputDir]
     if {[llength $files] == 0} {
         puts stderr "No .n or .3 files found in $inputDir (recursive)"
-        return
+        return 0
     }
     file mkdir $outputDir
 
@@ -210,6 +225,7 @@ proc batchConvert {inputDir outputDir lang linkmode noIndex {tip700 false}} {
     if {!$noIndex && [llength $indexEntries] > 0} {
         generateIndex $indexEntries $outputDir $linkmode
     }
+    return [expr {$fail == 0}]
 }
 
 # Argument-Verarbeitung
@@ -246,9 +262,10 @@ while {$i < [llength $argv]} {
 }
 
 if {$batch} {
-    batchConvert $batchIn $batchOut $lang $linkmode $noIndex $tip700
+    set ok [batchConvert $batchIn $batchOut $lang $linkmode $noIndex $tip700]
 } elseif {$inputFile ne ""} {
-    convertFile $inputFile $outputFile $lang $linkmode "" $tip700
+    set ok [lindex [convertFile $inputFile $outputFile $lang $linkmode "" $tip700] 0]
 } else {
-    convertFile "-" "" $lang $linkmode "" $tip700
+    set ok [lindex [convertFile "-" "" $lang $linkmode "" $tip700] 0]
 }
+exit [expr {$ok ? 0 : 1}]

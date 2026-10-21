@@ -225,7 +225,7 @@ proc n2txt::extractTextMd {content} {
         foreach inline $content {
             if {![dict exists $inline type]} continue
             set itype [dict get $inline type]
-            set itext [expr {[dict exists $inline text] ? [dict get $inline text] : ""}]
+            set itext [if {[dict exists $inline text]} {dict get $inline text} else {lindex ""}]
             switch $itype {
                 strong    { append result "**$itext**" }
                 emphasis  { append result "_${itext}_" }
@@ -234,7 +234,7 @@ proc n2txt::extractTextMd {content} {
                     # link rendert hier als [text](name.md) — Markdown-konformer
                     # Cross-Reference-Stil. Wenn der Konsument Plain-Text will,
                     # nutzt er extractText (oben).
-                    set name [expr {[dict exists $inline name] ? [dict get $inline name] : $itext}]
+                    set name [if {[dict exists $inline name]} {dict get $inline name} else {lindex $itext}]
                     append result "\[$itext\](${name}.md)"
                 }
                 default   { append result $itext }

@@ -143,18 +143,18 @@ test "listStack.basic" {
     foreach n $ast {
         if {[dict get $n type] eq "list"} { lappend lists $n }
     }
-    # Muss 2 separate Listen erzeugen: eine für inner (indent=1), eine für outer+afterRS (indent=0)
-    assert [expr {[llength $lists] == 2}] "2 Listen erwartet, got [llength $lists]"
-    # Innere Liste hat indentLevel 1
-    set innerList [lindex $lists 0]
-    set meta [dict get $innerList meta]
-    set il [expr {[dict exists $meta indentLevel] ? [dict get $meta indentLevel] : 0}]
-    assert [expr {$il == 1}] "Innere Liste indentLevel=1, got $il"
-    # Äußere Liste hat indentLevel 0
-    set outerList [lindex $lists 1]
-    set ometa [dict get $outerList meta]
-    set oil [expr {[dict exists $ometa indentLevel] ? [dict get $ometa indentLevel] : 0}]
-    assert [expr {$oil == 0}] "Äußere Liste indentLevel=0, got $oil"
+    # Listen in der Reihenfolge der Quelle (seit 2026-10-21; vorher blieb
+    # die aeussere Liste bis .RE offen und kam NACH der inneren):
+    # outer (indent 0), inner (indent 1), afterRS (indent 0)
+    assert [expr {[llength $lists] == 3}] "3 Listen erwartet, got [llength $lists]"
+    set ils {}
+    foreach l $lists {
+        set meta [dict get $l meta]
+        lappend ils [expr {[dict exists $meta indentLevel] ? [dict get $meta indentLevel] : 0}]
+    }
+    assert [expr {$ils eq {0 1 0}}] "indentLevel 0 1 0, got $ils"
+    set first [dict get [lindex [dict get [lindex $lists 0] content] 0] term]
+    assert [string match *outer* $first] "erste Liste beginnt mit outer"
 }
 
 test "listStack.double_nested" {
@@ -162,11 +162,15 @@ test "listStack.double_nested" {
     set ast [nroffparser::parse $src t.n]
     set lists {}
     foreach n $ast { if {[dict get $n type] eq "list"} { lappend lists $n } }
-    assert [expr {[llength $lists] == 3}] "3 Listen erwartet (indent 2,1,0), got [llength $lists]"
-    # Einzel-Items auf jedem Level
-    assert [expr {[llength [dict get [lindex $lists 0] content]] == 1}] "Level 2: 1 Item"
-    assert [expr {[llength [dict get [lindex $lists 1] content]] == 1}] "Level 1: 1 Item"
-    assert [expr {[llength [dict get [lindex $lists 2] content]] == 2}] "Level 0: 2 Items (a+d)"
+    # Reihenfolge der Quelle: a (0), b (1), c (2), d (0)
+    assert [expr {[llength $lists] == 4}] "4 Listen erwartet (indent 0,1,2,0), got [llength $lists]"
+    set ils {}
+    foreach l $lists {
+        set meta [dict get $l meta]
+        lappend ils [expr {[dict exists $meta indentLevel] ? [dict get $meta indentLevel] : 0}]
+        assert [expr {[llength [dict get $l content]] == 1}] "je 1 Item"
+    }
+    assert [expr {$ils eq {0 1 2 0}}] "indentLevel 0 1 2 0, got $ils"
 }
 
 test "listStack.unclosed_RS" {

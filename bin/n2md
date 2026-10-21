@@ -8,6 +8,7 @@
 #   n2md input.n output.md          # to file
 #   n2md --batch dir/ outdir/       # convert all .n/.3 files
 #   cat input.n | n2md -            # from stdin
+#   n2md --tip700 input.n           # TIP-700 format (YAML head, synopsis spans)
 
 package require Tcl 8.6-
 
@@ -26,6 +27,7 @@ package require docir
 package require docir::roffSource
 package require docir::md
 package require nroffparser
+package require n2md::tip700
 
 # Load modules
 foreach mod {mvdebug-0.2.tm nroffparser-0.2.tm} {
@@ -61,10 +63,13 @@ proc usage {} {
     puts ""
     puts "Options:"
     puts "  --batch DIR OUT     Convert all .n/.3 files in DIR to OUT/"
+    puts "  --tip700            TIP-700 format as written by man2markdown.tcl:"
+    puts "                      YAML head, \"::: {.synopsis} :::\" with spans,"
+    puts "                      SEE ALSO/KEYWORDS in the head"
     puts "  --help              Show this help"
     puts ""
     puts "Backwards-compatible (no-op) options for older scripts:"
-    puts "  -lang LANG, --linkmode MODE, --tip700"
+    puts "  -lang LANG, --linkmode MODE"
     puts "    accepted but ignored. For controllable link modes see n2html."
     puts ""
     puts "Examples:"
@@ -74,9 +79,11 @@ proc usage {} {
     puts "  cat dict.n | n2md -            # from stdin"
 }
 
-proc convertFile {inputFile outputFile} {
-    # Read input
+proc convertFile {inputFile outputFile {tip700 0}} {
+    # Read input (Handbuchseiten sind ASCII oder UTF-8; ohne -encoding
+    # haengt das Ergebnis von der Locale ab)
     if {$inputFile eq "-"} {
+        fconfigure stdin -encoding utf-8
         set nroff [read stdin]
         set sourceFile ""
     } else {
@@ -85,6 +92,7 @@ proc convertFile {inputFile outputFile} {
             return 0
         }
         set fh [open $inputFile r]
+        fconfigure $fh -encoding utf-8
         set nroff [read $fh]
         close $fh
         set sourceFile $inputFile
@@ -94,7 +102,11 @@ proc convertFile {inputFile outputFile} {
     if {[catch {
         set ast [nroffparser::parse $nroff $sourceFile]
         set ir  [docir::roff::fromAst $ast]
-        set md  [docir::md::render $ir]
+        if {$tip700} {
+            set md [n2md::tip700::render $nroff $ir]
+        } else {
+            set md [docir::md::render $ir]
+        }
     } err]} {
         puts stderr "Error converting $inputFile: $err"
         return 0
@@ -102,6 +114,7 @@ proc convertFile {inputFile outputFile} {
 
     # Write output
     if {$outputFile eq ""} {
+        fconfigure stdout -encoding utf-8
         puts -nonewline $md
     } else {
         file mkdir [file dirname $outputFile]
@@ -113,7 +126,7 @@ proc convertFile {inputFile outputFile} {
     return 1
 }
 
-proc batchConvert {inputDir outputDir lang {linkmode none} {tip700 false}} {
+proc batchConvert {inputDir outputDir {tip700 0}} {
     set files [list]
     foreach pattern {*.n *.3} {
         lappend files {*}[glob -nocomplain -directory $inputDir $pattern]
@@ -121,7 +134,7 @@ proc batchConvert {inputDir outputDir lang {linkmode none} {tip700 false}} {
 
     if {[llength $files] == 0} {
         puts stderr "No .n or .3 files found in $inputDir"
-        return
+        return 0
     }
 
     file mkdir $outputDir
@@ -131,7 +144,7 @@ proc batchConvert {inputDir outputDir lang {linkmode none} {tip700 false}} {
     foreach f [lsort $files] {
         set name [file rootname [file tail $f]]
         set outFile [file join $outputDir ${name}.md]
-        if {[convertFile $f $outFile]} {
+        if {[convertFile $f $outFile $tip700]} {
             incr ok
         } else {
             incr fail
@@ -139,6 +152,7 @@ proc batchConvert {inputDir outputDir lang {linkmode none} {tip700 false}} {
     }
 
     puts stderr "Converted: $ok  Failed: $fail  Total: [expr {$ok + $fail}]"
+    return [expr {$fail == 0}]
 }
 
 # Parse arguments
@@ -147,6 +161,7 @@ set outputFile ""
 set batch 0
 set batchIn ""
 set batchOut ""
+set tip700 0
 
 set i 0
 while {$i < [llength $argv]} {
@@ -170,8 +185,7 @@ while {$i < [llength $argv]} {
             incr i
         }
         --tip700 {
-            # Vorher fuer ast2md TIP-700 bracketed_spans. docir-md hat
-            # diese Option nicht. Ignorieren.
+            set tip700 1
         }
         --batch {
             set batch 1
@@ -191,11 +205,14 @@ while {$i < [llength $argv]} {
     incr i
 }
 
+# Bis 2026-10-21 rief --batch batchConvert mit $lang/$linkmode auf, die
+# nie gesetzt wurden ("can't read lang"), und n2md endete immer mit 0.
 if {$batch} {
-    batchConvert $batchIn $batchOut $lang $linkmode $tip700
+    set ok [batchConvert $batchIn $batchOut $tip700]
 } elseif {$inputFile ne ""} {
-    convertFile $inputFile $outputFile
+    set ok [convertFile $inputFile $outputFile $tip700]
 } else {
     # Try stdin
-    convertFile "-" ""
+    set ok [convertFile "-" "" $tip700]
 }
+exit [expr {$ok ? 0 : 1}]

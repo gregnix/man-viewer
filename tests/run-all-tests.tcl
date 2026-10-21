@@ -21,6 +21,7 @@ puts "=== Running All Tests ===\n"
 
 set testFiles {
     test-qw.tcl
+    test-n2md.tcl
     test-seeAlso.tcl
     test-blank-consumers.tcl
     test-renderer-parity.tcl

@@ -101,7 +101,7 @@ All load the docir repo via the loader:
 ```bash
 n2html input.n output.html [--theme manpage|default|none] [--lang DE]
                             [--link-mode local|anchor|online] [--toc]
-n2md   input.n output.md
+n2md   input.n output.md       [--tip700] [--batch DIR OUT]
 n2pdf  input.n output.pdf  [--paper a4|letter]
 n2svg  input.n output.svg
 n2txt  input.n output.txt    # does NOT use DocIR (direct AST→text)

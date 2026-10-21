@@ -1,5 +1,75 @@
 # man-viewer — Changelog
 
+## 2026-10-21 — n2md: list descriptions, lost text, `--tip700`
+
+Measured with n2md over Tcl 9.0.5 and Tk 9.0 (231 pages), rendered with
+mdstack. Tests: `tests/test-n2md.tcl` (new, 36 checks).
+
+### Fixed (nroffparser)
+
+- Text lines starting with `"` were dropped as comments: the comment
+  check `[string match "\\\"*" $line]` is the glob for a plain `"`.
+  http.n lost `"status code" that are defined for a HTTP response`.
+  Comments are now `^\.?\\"`.
+- Blank lines inside `.nf`/`.CS` were lost (every example with blank
+  lines came out squeezed); `.sp` inside a block now gives a blank line
+  instead of a `blank` node in front of the unfinished block. Trailing
+  blank lines of a block are dropped.
+- A blank line in running text starts a new paragraph (both paragraphs
+  ran together before).
+- `.RS` emits the open outer list first. It used to stay open until
+  `.RE` and end up AFTER everything indented: in Tcl.n the backslash
+  table came before "[1] Commands.". Text after `.RE` is a paragraph of
+  its own; `.TP` after `.RE` starts a new list (tests in
+  test-seeAlso.tcl adjusted to source order).
+- `.QW` inside a list description lost its word (went to the paragraph
+  instead of the item); unquoted `.QW word` gave `""`. New
+  `appendInline`/`macroArgs`; `.PQ`/`.QR` follow man.macros.
+- `\-`, `\.`, `\\` inside `\fB...\fR` came out unstyled (`-**global**`);
+  adjacent runs of the same style are merged. `\e` prints a backslash
+  (was dropped).
+- `.br` inside `.nf` appeared as text (ttk_notebook.n), `.VS` inside
+  `.nf` too (library.n).
+
+### Added
+
+- Paragraphs between `.VS`/`.VE` carry `meta.version` (outside lists;
+  `.VS`/`.VE` there end the paragraph).
+- `n2md --tip700`: TIP-700 Markdown as written by man2markdown.tcl
+  (module `n2md::tip700`, `lib/tm/n2md/tip700-0.1.tm`). Details and
+  measurement: doc/en/cli-tools.md.
+
+### Fixed (n2md)
+
+- `--batch` called `batchConvert` with `$lang`/`$linkmode`, never set
+  ("can't read lang"). Exit status was always 0; now 1 on failure.
+- Input is read as UTF-8, stdout written as UTF-8 (was the locale).
+- `expr {... ? $x : ""}` returns `2.1` for the text `2.10`: replaced in
+  mvdebug and n2txt where the value is text.
+
+### Changed (standalone `tools/nroff2md.tcl`)
+
+- Rebuilt on the DocIR pipeline, same output as `bin/n2md` (all 231
+  measured pages byte-identical, with `--tip700` too, Tcl 8.6 and 9.0).
+  It embedded `ast2md-0.1.tm`, deleted with the move to DocIR in May
+  2026, so the build script failed and the file stayed at its March
+  state. Now embeds mvdebug, nroffparser, docir, docir::roffSource,
+  docir::md and n2md::tip700; no installed modules needed.
+- `tools/build-nroff2md.tcl --docir DIR` (or `$DOCIR`, default
+  `../docir/lib/tm`). `package provide` lines are kept (tip700 and
+  roffSource `package require` their dependencies).
+- `--tip700` is the TIP-700 format of n2md; `--linkmode none|server|file`
+  via `docir::md` `linkResolve`; `-lang` accepted and ignored. Batch
+  (recursive) and `index.md` as before. Exit status 1 on failure.
+
+### Known
+
+- tests/test-blank-consumers.tcl `blank.consumer.docir_roff` fails as
+  before (expects blank nodes that docir::roff drops on purpose).
+- tests/test-renderer-parity.tcl fails on Tcl 9.0 as before (9 checks);
+  run-all-tests.tcl can hang at that file under Xvfb, alone it passes
+  on 8.6.
+
 ## 2026-05-14 — `mdviewer-docir-demo`: missing `docir::mdSource` added
 
 ### Fixed

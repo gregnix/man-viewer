@@ -1,14 +1,20 @@
 #!/usr/bin/env tclsh
 # nroff2md.tcl -- standalone nroff/man-page to Markdown converter
 #
-# Version:  0.2
-# Requires: Tcl 8.6+
+# Version:  0.3
+# Requires: Tcl 8.6+ (also 9.0)
 # Source:   https://github.com/gregnix/man-viewer
 #
-# Embedded modules:
-#   nroffparser-0.2  -- nroff parser (AST v1)
-#   ast2md-0.1       -- AST to Markdown renderer
-#   debug-0.2        -- debug/trace toolkit
+# Same pipeline as man-viewer/bin/n2md, in one file, without installed
+# modules: nroff -> nroffparser (AST) -> docir::roff (DocIR) -> docir::md.
+#
+# Embedded modules (built by tools/build-nroff2md.tcl, do not edit here):
+#   mvdebug-0.2          -- debug/trace toolkit      (man-viewer)
+#   nroffparser-0.2      -- nroff parser (AST v1)    (man-viewer)
+#   docir-0.1.1          -- DocIR core               (docir)
+#   docir::roffSource    -- AST -> DocIR             (docir)
+#   docir::md            -- DocIR -> Markdown        (docir)
+#   n2md::tip700         -- TIP-700 Markdown         (man-viewer)
 #
 # Copyright (c) 2026 Gregor Ebbing <gregnix@github>
 # All rights reserved.
@@ -41,9 +47,8 @@
 # Usage (run --help for full option list):
 #   tclsh nroff2md.tcl input.n                    # to stdout
 #   tclsh nroff2md.tcl input.n output.md          # to file
-#   tclsh nroff2md.tcl input.n -lang tcl          # code block language
+#   tclsh nroff2md.tcl --tip700 input.n           # TIP-700 (as man2markdown)
 #   tclsh nroff2md.tcl --linkmode file input.n    # SEE ALSO -> .md links
-#   tclsh nroff2md.tcl --tip700 input.n           # TIP-700 spans in SYNOPSIS
 #   tclsh nroff2md.tcl --batch dir/ outdir/       # batch convert (recursive)
 #   tclsh nroff2md.tcl --batch dir/ outdir/ --no-index  # without index.md
 #   cat input.n | tclsh nroff2md.tcl -            # from stdin
@@ -80,6 +85,8 @@ catch {package provide debug 0.2}
 # ============================================================
 # Core: Logging
 # ============================================================
+
+package provide mvdebug 0.2
 
 namespace eval debug {
     variable level 0
@@ -428,7 +435,7 @@ proc debug::ast::_formatContent {content prefix} {
             # List of inline nodes
             set parts {}
             foreach inline $content {
-                set t [expr {[dict exists $inline type] ? [dict get $inline type] : "?"}]
+                set t [if {[dict exists $inline type]} {dict get $inline type} else {lindex "?"}]
                 set v ""
                 if {[dict exists $inline text]} {
                     set v [dict get $inline text]
@@ -1296,6 +1303,8 @@ proc debug::scope::_autoLeave {name args} {
 # Version: 0.2
 # Author: Refactored according to AST-Spec
 
+package provide nroffparser 0.2
+
 # Load debug module if available (try any version, then create stubs)
 if {[catch {package require mvdebug}]} {
     # Debug module not available - create minimal stubs
@@ -1655,9 +1664,11 @@ proc nroffparser::parseLines {lines {sourceFile ""}} {
         
         # Remove comments
         # Pattern 1: .\" at start (standard nroff comment)
-        if {[string match ".\\\"*" $line]} { continue }
         # Pattern 2: \" at start (nroff comment)
-        if {[string match "\\\"*" $line]} { continue }
+        # Bis 2026-10-21 mit [string match "\\\"*"]: im Muster ist \" nur
+        # ein maskiertes ", es traf also Textzeilen, die mit " beginnen --
+        # in http.n verschwand '"status code" that are defined ...'.
+        if {[regexp {^\.?\\"} $line]} { continue }
         # Pattern 3: '\" at start (man page comment with single quote)
         if {[regexp {^'\\"} $line]} { continue }
         # Pattern 4: Check for '\" at start (alternative pattern)
@@ -1717,6 +1728,22 @@ proc nroffparser::parseBlocks {lines} {
         # Check if this is already a blank node (from parseLines)
         if {[string is list $line] && [llength $line] > 0} {
             if {[catch {dict get $line type} type] == 0 && $type eq "blank"} {
+                # In .nf/.CS ist die Leerzeile Teil des Codes. Bis
+                # 2026-10-21 ging sie verloren: jedes Beispiel mit
+                # Leerzeilen kam zusammengeschoben heraus.
+                if {[dict get $state mode] eq "pre"} {
+                    set preText [dict get $state preText]
+                    if {$preText ne ""} {
+                        dict set state preText "$preText\n"
+                    }
+                    continue
+                }
+                # Leerzeile im Fliesstext: nroff beginnt einen neuen Absatz
+                # (bis 2026-10-21 liefen beide Absaetze zusammen, und der
+                # blank-Knoten stand VOR dem noch offenen Absatz)
+                if {![llength [dict get $state currentList]]} {
+                    set state [nroffparser::flushParagraph $state]
+                }
                 # This is a blank node - add directly to AST
                 set ast [dict get $state ast]
                 lappend ast $line
@@ -1794,10 +1821,23 @@ proc nroffparser::handleLine {state line} {
                 dict set state mode normal
                 return [nroffparser::handleMacro $state $line]
             }
-            # Also recognize .sp in pre mode (it should create blank lines)
+            # .br in einem .nf-Block: Zeilen bleiben ohnehin getrennt.
+            # Vorher landete ".br" als Text im Block (ttk_notebook.n,
+            # ttk_panedwindow.n: SYNOPSIS mit .nf und .br).
+            if {$macro eq ".br"} {
+                return $state
+            }
+            # .sp im Block: Leerzeile im Code (bis 2026-10-21 ein
+            # blank-Knoten im AST VOR dem noch offenen Block)
             if {$macro eq ".sp"} {
                 debug::traceMacro $macro "in pre mode"
-                return [nroffparser::handleMacro $state $line]
+                set preText [dict get $state preText]
+                if {$preText ne ""} { dict set state preText "$preText\n" }
+                return $state
+            }
+            # .VS im Block (library.n: Uebersicht) -- vorher Text im Code
+            if {$macro eq ".VS"} {
+                return [nroffparser::handleVS $state [string trim [string range $line 3 end]]]
             }
             # Also recognize .ta in pre mode (it sets tab stops for following lines)
             if {$macro eq ".ta"} {
@@ -1839,12 +1879,7 @@ proc nroffparser::handleMacro {state line} {
                 return $state
             }
             # Add period to current paragraph
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph "."
-            } else {
-                dict set state currentParagraph "$cur ."
-            }
+            set state [nroffparser::appendInline $state "."]
             return $state
         }
         .TH {
@@ -1930,6 +1965,12 @@ proc nroffparser::handleMacro {state line} {
         .RS {
             # Relative start: aktuellen List-Kontext auf Stack sichern
             set state [nroffparser::flushParagraph $state]
+            # Die aeussere Liste jetzt ausgeben. Bis 2026-10-21 blieb sie
+            # bis .RE offen und kam erst NACH allem Eingerueckten in den
+            # AST: in Tcl.n stand die Tabelle der Backslash-Folgen vor
+            # "[1] Commands." (gemessen mit n2md). Text nach .RE wird ein
+            # eigener Absatz auf der aeusseren Ebene.
+            set state [nroffparser::flushList $state]
             set indentLevel [dict get $state indentLevel]
             # Stack-Frame mit aktuellem Kontext
             set frame [dict create \
@@ -2078,12 +2119,7 @@ proc nroffparser::handleMacro {state line} {
             }
             
             # Add to current paragraph
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph $underlineText
-            } else {
-                dict set state currentParagraph "$cur $underlineText"
-            }
+            set state [nroffparser::appendInline $state $underlineText]
             return $state
         }
         .UR {
@@ -2109,12 +2145,7 @@ proc nroffparser::handleMacro {state line} {
             # an eine pendingInlines-Liste.
             # Einfachste Lösung: URL-Link als Text-Markierung einfügen
             set linkMark "\[ur|$href|$urText\]"
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph $linkMark
-            } else {
-                dict set state currentParagraph "$cur $linkMark"
-            }
+            set state [nroffparser::appendInline $state $linkMark]
             if {$punct ne ""} {
                 dict set state currentParagraph                     "[dict get $state currentParagraph]$punct"
             }
@@ -2126,12 +2157,7 @@ proc nroffparser::handleMacro {state line} {
         .MT {
             # Manual Title - empty string, just calls .QW ""
             # Don't flush paragraph - .MT adds to current paragraph
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph "\"\""
-            } else {
-                dict set state currentParagraph "$cur \"\""
-            }
+            set state [nroffparser::appendInline $state "\"\""]
             return $state
         }
         .SO {
@@ -2148,182 +2174,35 @@ proc nroffparser::handleMacro {state line} {
             # Quote word: .QW arg1 ?arg2?
             # Print arg1 in quotes, then arg2 normally (for trailing punctuation)
             # Don't flush paragraph - .QW adds to current paragraph
-            
-            # Parse arguments - handle quoted strings properly
-            set arg1 ""
-            set arg2 ""
-            set inQuotes 0
-            set current ""
-            set len [string length $rest]
-            
-            for {set i 0} {$i < $len} {incr i} {
-                set char [string index $rest $i]
-                if {$char eq "\""} {
-                    if {$inQuotes} {
-                        # End of quoted string
-                        set arg1 $current
-                        set current ""
-                        set inQuotes 0
-                    } else {
-                        # Start of quoted string
-                        set inQuotes 1
-                    }
-                } elseif {$char eq " " && !$inQuotes && $arg1 ne ""} {
-                    # Space outside quotes - start arg2
-                    set arg2 [string trim [string range $rest [expr {$i + 1}] end]]
-                    break
-                } else {
-                    append current $char
-                }
-            }
-            
-            # If we're still in quotes, arg1 is current
-            if {$inQuotes && $arg1 eq ""} {
-                set arg1 $current
-            }
-            
-            # Remove outer quotes from arg1 if present (they'll be added back)
-            set arg1 [string trim $arg1 "\""]
-            
-            # Create quoted text: "arg1" arg2
-            set quotedText "\"$arg1\""
-            if {$arg2 ne ""} {
-                append quotedText " $arg2"
-            }
+            #
+            # Argumente wie nroff: "..." oder ein Wort. Vorher wurde arg1
+            # nur bei Anfuehrungszeichen gesetzt; ".QW inside" ergab "".
+            set qwArgs [nroffparser::macroArgs $rest]
+            set arg1 [lindex $qwArgs 0]
+            set arg2 [join [lrange $qwArgs 1 end] " "]
+
+            # "arg1"arg2 -- ohne Leerzeichen, wie man.macros (\$1''\$2):
+            # arg2 ist meist ein Satzzeichen
+            set quotedText "\"$arg1\"$arg2"
             
             # Add to current paragraph
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph $quotedText
-            } else {
-                dict set state currentParagraph "$cur $quotedText"
-            }
+            set state [nroffparser::appendInline $state $quotedText]
             return $state
         }
         .PQ {
-            # Parenthesized quote: .PQ arg1 ?arg2? ?arg3?
-            # Print (arg1 in quotes arg2) arg3
-            # Don't flush paragraph - .PQ adds to current paragraph
-            
-            # Parse similar to .QW
-            set arg1 ""
-            set arg2 ""
-            set arg3 ""
-            set inQuotes 0
-            set current ""
-            set len [string length $rest]
-            set argNum 1
-            
-            for {set i 0} {$i < $len} {incr i} {
-                set char [string index $rest $i]
-                if {$char eq "\""} {
-                    if {$inQuotes} {
-                        if {$argNum == 1} {
-                            set arg1 $current
-                        } elseif {$argNum == 2} {
-                            set arg2 $current
-                        }
-                        set current ""
-                        set inQuotes 0
-                        incr argNum
-                    } else {
-                        set inQuotes 1
-                    }
-                } elseif {$char eq " " && !$inQuotes} {
-                    if {$current ne ""} {
-                        if {$argNum == 1 && $arg1 eq ""} {
-                            set arg1 $current
-                        } elseif {$argNum == 2 && $arg2 eq ""} {
-                            set arg2 $current
-                        } elseif {$argNum == 3} {
-                            set arg3 $current
-                        }
-                        set current ""
-                        incr argNum
-                    }
-                } else {
-                    append current $char
-                }
-            }
-            
-            if {$current ne ""} {
-                if {$argNum == 1} {
-                    set arg1 $current
-                } elseif {$argNum == 2} {
-                    set arg2 $current
-                } else {
-                    set arg3 $current
-                }
-            }
-            
-            set arg1 [string trim $arg1 "\""]
-            set quotedText "(\"$arg1\""
-            if {$arg2 ne ""} {
-                append quotedText " $arg2"
-            }
-            append quotedText ")"
-            if {$arg3 ne ""} {
-                append quotedText " $arg3"
-            }
-            
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph $quotedText
-            } else {
-                dict set state currentParagraph "$cur $quotedText"
-            }
+            # Parenthesized quote: .PQ arg1 ?arg2? ?arg3? -> ("arg1"arg2)arg3
+            # (man.macros, ohne Leerzeichen)
+            lassign [nroffparser::macroArgs $rest] arg1 arg2 arg3
+            set quotedText "(\"$arg1\"$arg2)$arg3"
+            set state [nroffparser::appendInline $state $quotedText]
             return $state
         }
         .QR {
-            # Quoted range: .QR arg1 arg2 ?arg3?
-            # Print "arg1" - "arg2" arg3
-            # Don't flush paragraph - .QR adds to current paragraph
-            
-            # Parse two quoted arguments
-            set arg1 ""
-            set arg2 ""
-            set arg3 ""
-            set inQuotes 0
-            set current ""
-            set len [string length $rest]
-            set argNum 1
-            
-            for {set i 0} {$i < $len} {incr i} {
-                set char [string index $rest $i]
-                if {$char eq "\""} {
-                    if {$inQuotes} {
-                        if {$argNum == 1} {
-                            set arg1 $current
-                        } elseif {$argNum == 2} {
-                            set arg2 $current
-                        }
-                        set current ""
-                        set inQuotes 0
-                        incr argNum
-                    } else {
-                        set inQuotes 1
-                    }
-                } elseif {$char eq " " && !$inQuotes && $argNum > 2} {
-                    set arg3 [string trim [string range $rest [expr {$i + 1}] end]]
-                    break
-                } elseif {$char ne " " || $inQuotes} {
-                    append current $char
-                }
-            }
-            
-            set arg1 [string trim $arg1 "\""]
-            set arg2 [string trim $arg2 "\""]
-            set quotedText "\"$arg1\" - \"$arg2\""
-            if {$arg3 ne ""} {
-                append quotedText " $arg3"
-            }
-            
-            set cur [dict get $state currentParagraph]
-            if {$cur eq ""} {
-                dict set state currentParagraph $quotedText
-            } else {
-                dict set state currentParagraph "$cur $quotedText"
-            }
+            # Quoted range: .QR arg1 arg2 ?arg3? -> "arg1"-"arg2"arg3
+            # (man.macros: \-, ohne Leerzeichen)
+            lassign [nroffparser::macroArgs $rest] arg1 arg2 arg3
+            set quotedText "\"$arg1\"-\"$arg2\"$arg3"
+            set state [nroffparser::appendInline $state $quotedText]
             return $state
         }
         default {
@@ -2332,6 +2211,53 @@ proc nroffparser::handleMacro {state line} {
         }
     }
     
+    return $state
+}
+
+# Argumente einer Makrozeile wie nroff: "..." (Anfuehrung, auch leer) oder Wort.
+proc nroffparser::macroArgs {rest} {
+    set out {}
+    foreach {- q w} [regexp -all -inline {"([^"]*)"?|(\S+)} $rest] {
+        if {$w ne ""} { lappend out $w } else { lappend out $q }
+    }
+    return $out
+}
+
+# Inline-Text eines Makros (.QW, .PQ, .QR, .MT, ".", .UL, .UR) an die
+# Stelle haengen, an die auch eine normale Textzeile ginge: in eine offene
+# Liste die Beschreibung des letzten Eintrags, sonst den Absatz.
+# Vorher gingen diese Makros immer in currentParagraph. In einer .OP- oder
+# .IP-Liste stand der Text dann nicht in der Beschreibung, und
+# flushParagraph uebernahm ihn nur fuer .TP-Listen: aus
+#   must be to an item before it is considered to be
+#   .QW inside
+#   the item.
+# wurde "... considered to be the item." (canvas.n, gemessen 2026-10-21).
+proc nroffparser::appendInline {state text} {
+    set currentList [dict get $state currentList]
+    if {[llength $currentList] > 0
+            && !([dict exists $state waitingForTerm] && [dict get $state waitingForTerm])
+            && [dict get $state currentParagraph] eq ""} {
+        set lastIdx [expr {[llength $currentList] - 1}]
+        set lastItem [lindex $currentList $lastIdx]
+        set desc [dict get $lastItem desc]
+        if {$desc eq ""} {
+            dict set lastItem desc $text
+        } elseif {[string match {[.,;:!?)]*} $text]} {
+            dict set lastItem desc "$desc$text"
+        } else {
+            dict set lastItem desc "$desc $text"
+        }
+        lset currentList $lastIdx $lastItem
+        dict set state currentList $currentList
+        return $state
+    }
+    set cur [dict get $state currentParagraph]
+    if {$cur eq ""} {
+        dict set state currentParagraph $text
+    } else {
+        dict set state currentParagraph "$cur $text"
+    }
     return $state
 }
 
@@ -2559,6 +2485,14 @@ proc nroffparser::handleVS {state rest} {
         set version [string trim $rest "\""]
     }
     
+    # Ausserhalb einer Liste beginnt mit .VS ein neuer Absatz: Absaetze
+    # im Block bekommen meta.version (TIP 700: ::: {.info -version="..."}).
+    # In einer Listenbeschreibung bleibt der Text zusammen (wie
+    # man2markdown, das dort keine Markierung setzt).
+    if {![llength [dict get $state currentList]]} {
+        set state [nroffparser::flushParagraph $state]
+    }
+
     # Mark that we're in a VS block
     dict set state inVSBlock 1
     dict set state vsVersion $version
@@ -2585,6 +2519,10 @@ proc nroffparser::handleVE {state rest} {
         return $state
     }
     
+    if {![llength [dict get $state currentList]]} {
+        set state [nroffparser::flushParagraph $state]
+    }
+
     # End VS block
     dict set state inVSBlock 0
     dict set state vsVersion ""
@@ -2826,12 +2764,7 @@ proc nroffparser::handleText {state line} {
         set cur [dict get $state urText]
         dict set state urText [expr {$cur eq "" ? $line : "$cur $line"}]
     } else {
-        set cur [dict get $state currentParagraph]
-        if {$cur eq ""} {
-            dict set state currentParagraph $line
-        } else {
-            dict set state currentParagraph "$cur $line"
-        }
+        set state [nroffparser::appendInline $state $line]
     }
     
     return $state
@@ -2916,6 +2849,11 @@ proc nroffparser::flushParagraph {state} {
                 dict set meta indentLevel $indentLevel
             }
         }
+        # Absatz zwischen .VS und .VE: Versionsangabe ("8.7", "TIP508",
+        # auch leer)
+        if {[dict exists $state inVSBlock] && [dict get $state inVSBlock]} {
+            dict set meta version [dict get $state vsVersion]
+        }
         set state [nroffparser::appendNode $state paragraph $text $meta]
         dict set state currentParagraph ""
     }
@@ -2923,7 +2861,8 @@ proc nroffparser::flushParagraph {state} {
 }
 
 proc nroffparser::flushPre {state} {
-    set text [dict get $state preText]
+    # Leerzeilen am Ende des Blocks (vor .CE/.fi) gehoeren nicht zum Code
+    set text [string trimright [dict get $state preText] \n]
     if {$text ne ""} {
         # AST-Spec: pre node
         set state [nroffparser::appendNode $state pre $text {}]
@@ -3159,6 +3098,36 @@ proc nroffparser::detectLinks {inlines} {
 #   Also handles escape sequences: \-, \., \e, etc.
 #   Removes inline comments: .\" ... (but not at start of line - handled earlier)
 #   Returns list of inline AST nodes: {type text|strong|emphasis text "..."}
+# Ein Text-Inline in der aktuellen Schrift (bold/italic/normal).
+proc nroffparser::styled {style txt} {
+    switch -- $style {
+        bold    { return [dict create type strong text $txt] }
+        italic  { return [dict create type emphasis text $txt] }
+        default { return [dict create type text text $txt] }
+    }
+}
+
+# Benachbarte Inlines gleicher Art (text/strong/emphasis) zusammenlegen.
+# Sonst wird "\fB\-global\fR" zu zwei strong-Knoten, und Markdown
+# bekommt "**-****global**".
+proc nroffparser::mergeInlines {inlines} {
+    set out {}
+    foreach i $inlines {
+        set t [dict get $i type]
+        if {[llength $out] && $t in {text strong emphasis}
+                && [dict size $i] == 2 && [dict exists $i text]} {
+            set last [lindex $out end]
+            if {[dict get $last type] eq $t && [dict size $last] == 2} {
+                dict append last text [dict get $i text]
+                lset out end $last
+                continue
+            }
+        }
+        lappend out $i
+    }
+    return $out
+}
+
 proc nroffparser::parseInlines {text} {
     # Remove inline comments (.\" ...) but preserve escape sequences
     # Pattern: .\" followed by anything until end of line
@@ -3349,18 +3318,21 @@ proc nroffparser::parseInlines {text} {
                     }
                 }
                 - {
-                    # Hyphen/minus: \-
-                    lappend inlines [dict create type text text "-"]
+                    # Hyphen/minus: \- -- in der aktuellen Schrift. Vorher
+                    # immer normal: "\fB\-global\fR" ergab "-**global**".
+                    lappend inlines [nroffparser::styled $currentStyle "-"]
                     set pos [expr {$escapeEnd + 1}]
                 }
                 . {
                     # Period: \.
-                    lappend inlines [dict create type text text "."]
+                    lappend inlines [nroffparser::styled $currentStyle "."]
                     set pos [expr {$escapeEnd + 1}]
                 }
                 e {
-                    # Escape character: \e (usually ignored or treated as space)
-                    # In man pages, \e is often used for line continuation
+                    # \e druckt das Escape-Zeichen, also "\" (groff: \e).
+                    # Die Tcl-Handbuchseiten schreiben so jeden Backslash im
+                    # Text ("\en", "\e\e"). Vorher wurde \e verworfen.
+                    lappend inlines [nroffparser::styled $currentStyle "\\"]
                     set pos [expr {$escapeEnd + 1}]
                 }
                 & {
@@ -3410,7 +3382,7 @@ proc nroffparser::parseInlines {text} {
                 }
                 \\ {
                     # Literal backslash: \\
-                    lappend inlines [dict create type text text "\\"]
+                    lappend inlines [nroffparser::styled $currentStyle "\\"]
                     set pos [expr {$escapeEnd + 1}]
                 }
                 ( {
@@ -3446,6 +3418,7 @@ proc nroffparser::parseInlines {text} {
     if {[llength $inlines] == 0 && $text ne ""} {
         lappend inlines [dict create type text text $text]
     }
+    set inlines [nroffparser::mergeInlines $inlines]
     
     return $inlines
 }
@@ -3526,660 +3499,2236 @@ proc nroffparser::_mapSpecialChar {code} {
 }
 
 # ===========================================================================
-# EMBEDDED: ast2md-0.1.tm
+# EMBEDDED: docir-0.1.1.tm
 # ===========================================================================
 
-# ast2md-0.1.tm -- nroff AST to Markdown renderer
+# docir-0.1.1.tm – DocIR Intermediate Representation
+# dump: prints every block type (escaped labels, listItem/legacy list items,
+#   table rows, math_block); validate: blank without content is valid.
+# 0.1.1 (2026-06-20): validator accepts `softbreak` (inlineTypes whitelist +
+#   field-less like `linebreak`) — completes the 2026-06-14 softbreak work.
+# Validator, Pretty-Dump, Diff
+# Spec: doc/docir-spec.md
 #
-# Converts the AST produced by nroffparser into Markdown.
-# The output is compatible with mdparser / mdstack.
-#
-# Usage:
-#   package require ast2md
-#   set md [ast2md::render $ast]
-#   set md [ast2md::render $ast -lang tcl -tip700 true]
-#
-# TIP-700 mode (-tip700 true):
-#   In SYNOPSIS sections, command syntax lines are rendered with
-#   bracketed_span class attributes per TIP-700 specification:
-#     [array]{.cmd} [get]{.sub} [arrayName]{.arg} [pattern]{.optarg}
-#   Outside SYNOPSIS the rendering stays plain Markdown.
-#
-#   Spec: nogit/stddoc/de/700.md (or core.tcl-lang.org/tips/.../700.md).
+# Namespace: ::docir
+# Tcl 8.6+ / 9.x kompatibel
 
-namespace eval ast2md {
-    namespace export render
+package provide docir 0.1.1
+package require Tcl 8.6-
 
-    # State variables, set by render before the main loop.
-    # Intentionally namespace-scoped instead of arg-passed so that
-    # helper procs can read them without signature changes.
-    variable opt_tip700  false
-    variable in_synopsis 0
+namespace eval ::docir {
+    # Gültige Block-Typen
+    variable blockTypes {
+        doc_meta doc_header heading paragraph pre list listItem blank hr
+        table tableRow tableCell
+        image footnote_section footnote_def div
+        math_block
+    }
+    # Gültige Inline-Typen
+    variable inlineTypes {
+        text strong emphasis underline strike code link
+        image linebreak softbreak span footnote_ref
+        math
+    }
+    # IR-Schema-Versionen die dieser Validator/Hub verarbeiten kann.
+    # Wird von docir::schemaVersion / docir::checkSchemaVersion benutzt.
+    # Renderer können selbst engere Mengen definieren.
+    variable SUPPORTED_SCHEMA_VERSIONS {1}
+
+    # Block-Typen die zwar gültiger Teil des IR sind, aber von Senken
+    # NICHT als Inhalt gerendert werden. Sie tragen nur Schema-/Meta-
+    # Information, die Validator und Hub auswerten (z.B. Schema-Version).
+    # Senken sollen diese Typen silent skippen — anstatt eine "unknown
+    # block"-Warnung auszulösen.
+    #
+    # Eintrag hier ergänzen ist die einzige Stelle, die geändert werden
+    # muss, wenn ein neuer Schema-Marker-Block-Typ eingeführt wird.
+    variable SCHEMA_ONLY_BLOCKS {doc_meta}
 }
 
-# ast2md::render --
-#   Main entry point. Converts a nroff AST to Markdown string.
-#
-# Arguments:
-#   ast   - List of AST nodes from nroffparser::parse
-#   args  - Options: -lang LANG (code block language, default "tcl")
-#                    -tip700 BOOL (emit TIP-700 spans in SYNOPSIS,
-#                                  default false)
-#                    -linkmode MODE (none|server|file, default none)
-#
-# Returns:
-#   Markdown string
-#
-proc ast2md::render {ast args} {
-    variable opt_tip700
-    variable in_synopsis
+# ============================================================
+# docir::isSchemaOnly -- prüft ob ein Block-Typ zur "Schema-only"-
+# Klasse gehört, die Senken silent skippen sollen.
+# Renderer rufen das im default-Case ihres Block-Switches auf,
+# bevor sie eine "unknown"-Warnung ausgeben.
+# ============================================================
 
-    # Parse options
-    set opts(-lang)     "tcl"
-    set opts(-tip700)   false
-    set opts(-linkmode) "none"
-    foreach {k v} $args {
-        if {![info exists opts($k)]} {
-            error "unknown option $k, must be -lang, -tip700 or -linkmode"
+proc docir::isSchemaOnly {type} {
+    variable SCHEMA_ONLY_BLOCKS
+    return [expr {$type in $SCHEMA_ONLY_BLOCKS}]
+}
+
+# ============================================================
+# docir::validate -- Prüft einen DocIR-Stream
+# Gibt {} zurück wenn OK, sonst Liste von Fehlermeldungen
+# ============================================================
+
+proc docir::validate {ir} {
+    variable blockTypes
+    variable inlineTypes
+    set errors {}
+    set i 0
+    foreach node $ir {
+        incr i
+        # Pflichtfelder. blank traegt keinen Inhalt: content darf dort
+        # fehlen und gilt dann als {}.
+        set required {type content meta}
+        if {[dict exists $node type] && [dict get $node type] eq "blank"} {
+            set required {type meta}
         }
-        set opts($k) $v
-    }
-
-    set opt_tip700  $opts(-tip700)
-    set in_synopsis 0
-
-    set lines {}
-    foreach node $ast {
-        set type [dict get $node type]
-
-        # Section-Tracking für SYNOPSIS-Erkennung. Nur level-1
-        # Sections (.SH) werden ausgewertet — .SS-Subsections
-        # ändern den SYNOPSIS-Status nicht.
-        if {$type eq "section"} {
-            set meta [expr {[dict exists $node meta] ? [dict get $node meta] : {}}]
-            set lvl 1
-            if {[dict exists $meta level]} { set lvl [dict get $meta level] }
-            if {$lvl == 1} {
-                set sectionText [_renderInlinesPlain [dict get $node content]]
-                set in_synopsis [string equal -nocase [string trim $sectionText] "SYNOPSIS"]
+        set missing 0
+        foreach field $required {
+            if {![dict exists $node $field]} {
+                lappend errors "Node $i: Pflichtfeld '$field' fehlt"
+                set missing 1
             }
         }
+        if {$missing} continue
 
-        switch -- $type {
-            heading    { lappend lines [_renderHeading $node] }
-            section    { lappend lines [_renderSection $node] }
-            subsection { lappend lines [_renderSection $node] }
-            paragraph  { lappend lines [_renderParagraph $node $opts(-linkmode)] }
-            pre        { lappend lines [_renderPre $node $opts(-lang)] }
-            list       { lappend lines [_renderList $node $opts(-linkmode)] }
-            blank      { lappend lines "" }
-            default    { lappend lines [_renderParagraph $node $opts(-linkmode)] }
+        set type    [dict get $node type]
+        set content [expr {[dict exists $node content] ? [dict get $node content] : {}}]
+        set meta    [dict get $node meta]
+
+        # Block-Typ bekannt?
+        if {$type ni $blockTypes} {
+            lappend errors "Node $i: Unbekannter Block-Typ '$type'"
         }
-    }
 
-    set result [join $lines \n]
-    # Clean up triple+ blank lines to double
-    regsub -all {\n\n\n+} $result "\n\n" result
-    return $result
-}
-
-# --- Heading (.TH) ---
-
-proc ast2md::_renderHeading {node} {
-    set meta [dict get $node meta]
-    set name [dict get $meta name]
-    set section ""
-    if {[dict exists $meta section]} {
-        set section [dict get $meta section]
-    }
-    if {$section ne ""} {
-        return "# $name\n"
-    }
-    return "# $name\n"
-}
-
-# --- Section (.SH / .SS) ---
-
-proc ast2md::_renderSection {node} {
-    set meta ""
-    if {[dict exists $node meta]} {
-        set meta [dict get $node meta]
-    }
-    set level 1
-    if {$meta ne "" && [dict exists $meta level]} {
-        set level [dict get $meta level]
-    }
-    set text [_renderInlines [dict get $node content]]
-
-    if {$level == 1} {
-        return "\n## $text\n"
-    } else {
-        return "\n### $text\n"
-    }
-}
-
-# --- Paragraph ---
-
-proc ast2md::_renderParagraph {node {linkmode none}} {
-    variable opt_tip700
-    variable in_synopsis
-
-    set content [dict get $node content]
-    if {$opt_tip700 && $in_synopsis} {
-        set text [_renderSynopsisInlines $content]
-    } else {
-        set text [_renderInlines $content $linkmode]
-    }
-    set indent ""
-    if {[dict exists $node meta]} {
-        set meta [dict get $node meta]
-        if {$meta ne "" && [dict exists $meta indentLevel]} {
-            set lvl [dict get $meta indentLevel]
-            if {$lvl > 0} {
-                set indent [string repeat "  " $lvl]
+        # Typ-spezifische Prüfungen
+        switch $type {
+            doc_meta {
+                # content muss leer sein
+                if {$content ne {}} {
+                    lappend errors "Node $i (doc_meta): content muss {} sein"
+                }
+                # irSchemaVersion ist Pflichtfeld in meta
+                if {![dict exists $meta irSchemaVersion]} {
+                    lappend errors "Node $i (doc_meta): meta.irSchemaVersion fehlt"
+                } else {
+                    set v [dict get $meta irSchemaVersion]
+                    if {![string is integer -strict $v] || $v < 1} {
+                        lappend errors "Node $i (doc_meta): meta.irSchemaVersion muss Integer >= 1 sein, ist '$v'"
+                    }
+                }
+                # Mehrfach-Vorkommen ist Schema-Verletzung
+                if {[info exists docMetaSeen]} {
+                    lappend errors "Node $i (doc_meta): doc_meta darf nur einmal vorkommen (zuvor an Node $docMetaSeen)"
+                } else {
+                    set docMetaSeen $i
+                }
             }
-        }
-    }
-    return "${indent}${text}\n"
-}
-
-# --- Pre (.CS/.CE, .nf/.fi) ---
-
-proc ast2md::_renderPre {node lang} {
-    set content [dict get $node content]
-    set text ""
-    if {[llength $content] > 0} {
-        # content is an inline list
-        set text [_renderInlinesPlain $content]
-    }
-    # Remove leading/trailing blank lines
-    set text [string trim $text \n]
-    return "\n```${lang}\n${text}\n```\n"
-}
-
-# --- List (TP, IP, OP, AP) ---
-
-proc ast2md::_renderList {node {linkmode none}} {
-    set meta [dict get $node meta]
-    set kind [dict get $meta kind]
-    set content [dict get $node content]
-    set lines {}
-
-    foreach item $content {
-        set term ""
-        if {[dict exists $item term]} {
-            set term [dict get $item term]
-        }
-        set desc ""
-        if {[dict exists $item desc]} {
-            set desc [dict get $item desc]
-        }
-        set blocks {}
-        if {[dict exists $item blocks]} {
-            set blocks [dict get $item blocks]
-        }
-
-        switch -- $kind {
-            tp - ap {
-                # Definition list: term + description
-                #
-                # Split case: if desc is empty but term contains more than
-                # one inline (e.g. {strong "auto"} {text " As the input..."}),
-                # the parser stored term+desc on one line after .TP.
-                # Split: first inline is the term, remainder is the desc.
-                if {$desc eq "" && [llength $term] > 1} {
-                    set firstInline [lindex $term 0]
-                    if {[dict exists $firstInline type] &&
-                        [dict get $firstInline type] in {strong emphasis text}} {
-                        set desc  [lrange $term 1 end]
-                        set term  [list $firstInline]
-                        # Strip leading space from first desc inline
-                        set di0 [lindex $desc 0]
-                        if {[dict exists $di0 text]} {
-                            set t [string trimleft [dict get $di0 text]]
-                            dict set di0 text $t
-                            lset desc 0 $di0
+            doc_header {
+                # content muss leer sein
+                if {$content ne {}} {
+                    lappend errors "Node $i (doc_header): content muss {} sein"
+                }
+            }
+            heading {
+                if {![dict exists $meta level]} {
+                    lappend errors "Node $i (heading): meta.level fehlt"
+                } else {
+                    set lvl [dict get $meta level]
+                    if {![string is integer $lvl] || $lvl < 1 || $lvl > 6} {
+                        lappend errors "Node $i (heading): level muss 1..6 sein, ist '$lvl'"
+                    }
+                }
+                # content: Inline-Liste
+                set errors [concat $errors [docir::_validateInlines $i heading $content]]
+            }
+            paragraph {
+                set errors [concat $errors [docir::_validateInlines $i paragraph $content]]
+            }
+            pre {
+                set errors [concat $errors [docir::_validateInlines $i pre $content]]
+            }
+            list {
+                if {![dict exists $meta kind]} {
+                    lappend errors "Node $i (list): meta.kind fehlt"
+                }
+                # Items: müssen listItem-Nodes sein. Legacy-Form {term desc}
+                # wird nur akzeptiert wenn KEIN type-Feld da ist (sonst war's
+                # gemeint als typed-Node und ist falsch eingebettet — z.B.
+                # ein 'list'-Knoten direkt in list.content statt im listItem
+                # eines vorherigen Items).
+                set j 0
+                foreach item $content {
+                    incr j
+                    if {[dict exists $item type]} {
+                        set itype [dict get $item type]
+                        if {$itype eq "listItem"} {
+                            # Neue Form: vollständiger DocIR-Node
+                            if {![dict exists $item content]} {
+                                lappend errors "Node $i, Item $j (listItem): 'content' fehlt"
+                            }
+                            if {![dict exists $item meta] || ![dict exists [dict get $item meta] term]} {
+                                lappend errors "Node $i, Item $j (listItem): meta.term fehlt"
+                            }
+                        } else {
+                            # Schema-Verletzung: getypter Knoten der nicht
+                            # listItem ist. Häufiger Fall: nested 'list'-Node
+                            # direkt im content statt im listItem.content
+                            # eines vorherigen Items (mdparser-typischer Bug).
+                            lappend errors "Node $i, Item $j: list.content darf nur listItem-Knoten enthalten, fand type='$itype' (nested lists müssen im content des listItem-Vorgängers liegen oder als separate list-Nodes auf Top-Level)"
+                        }
+                    } else {
+                        # Legacy-Form ohne type-Feld: {term desc}
+                        foreach field {term desc} {
+                            if {![dict exists $item $field]} {
+                                lappend errors "Node $i, Item $j (legacy listItem): Feld '$field' fehlt"
+                            }
                         }
                     }
                 }
-
-                set termText [_renderInlinesPlain $term]
-                if {$termText ne ""} {
-                    lappend lines "**${termText}**"
+            }
+            listItem {
+                # listItem kann auch top-level vorkommen (z.B. in Tests)
+                if {![dict exists $meta kind]} {
+                    lappend errors "Node $i (listItem): meta.kind fehlt"
                 }
-                if {$desc ne ""} {
-                    set descText [_renderInlines $desc $linkmode]
-                    lappend lines ": ${descText}"
+                if {![dict exists $meta term]} {
+                    lappend errors "Node $i (listItem): meta.term fehlt"
                 }
-                # Render sub-blocks if any
-                foreach block $blocks {
-                    set btype [dict get $block type]
-                    if {$btype eq "paragraph"} {
-                        set btext [_renderInlines [dict get $block content] $linkmode]
-                        lappend lines ": ${btext}"
-                    } elseif {$btype eq "pre"} {
-                        lappend lines ""
-                        lappend lines [_renderPre $block "tcl"]
+                set errors [concat $errors [docir::_validateInlines $i listItem $content]]
+            }
+            blank {
+                if {[dict exists $meta lines]} {
+                    set l [dict get $meta lines]
+                    if {![string is integer $l] || $l < 1} {
+                        lappend errors "Node $i (blank): meta.lines muss >= 1 sein"
                     }
                 }
-                lappend lines ""
             }
-            ip {
-                # Bullet or numbered list
-                set termText ""
-                if {$term ne ""} {
-                    set termText [_renderInlinesPlain $term]
-                }
-                set descText ""
-                if {$desc ne ""} {
-                    set descText [_renderInlines $desc $linkmode]
-                }
-                # Check if bullet
-                set isBullet [expr {$termText eq "\u2022" || $termText eq "*" || $termText eq "\\(bu"}]
-                if {$isBullet} {
-                    lappend lines "- ${descText}"
-                } elseif {$termText ne ""} {
-                    # Numbered or custom term
-                    lappend lines "**${termText}** ${descText}"
+            table {
+                # content ist Liste von tableRow-Nodes
+                if {![dict exists $meta columns]} {
+                    lappend errors "Node $i (table): meta.columns fehlt"
                 } else {
-                    lappend lines "- ${descText}"
+                    set cols [dict get $meta columns]
+                    if {![string is integer $cols] || $cols < 1} {
+                        lappend errors "Node $i (table): meta.columns muss >= 1 sein"
+                    }
                 }
-                # Sub-blocks
-                foreach block $blocks {
-                    set btype [dict get $block type]
-                    if {$btype eq "paragraph"} {
-                        set btext [_renderInlines [dict get $block content] $linkmode]
-                        lappend lines "  ${btext}"
+                set j 0
+                foreach row $content {
+                    incr j
+                    if {![dict exists $row type] || [dict get $row type] ne "tableRow"} {
+                        lappend errors "Node $i, Row $j: muss type tableRow haben"
                     }
                 }
             }
-            op {
-                # Option paragraph: term is "cmdName|dbName|dbClass"
-                set termText ""
-                if {$term ne ""} {
-                    if {[string match "*|*" $term]} {
-                        set parts [split $term |]
-                        set cmd [lindex $parts 0]
-                        set db [lindex $parts 1]
-                        set cls [lindex $parts 2]
-                        set termText "**${cmd}** (${db}/${cls})"
-                    } else {
-                        set termText [_renderInlines $term $linkmode]
+            tableRow {
+                # content ist Liste von tableCell-Nodes
+                set j 0
+                foreach cell $content {
+                    incr j
+                    if {![dict exists $cell type] || [dict get $cell type] ne "tableCell"} {
+                        lappend errors "Node $i (tableRow), Cell $j: muss type tableCell haben"
                     }
                 }
-                set descText ""
-                if {$desc ne ""} {
-                    set descText [_renderInlines $desc $linkmode]
-                }
-                if {$termText ne ""} {
-                    lappend lines "${termText}"
-                }
-                if {$descText ne ""} {
-                    lappend lines ": ${descText}"
-                }
-                lappend lines ""
             }
-            default {
-                # Fallback: render as paragraphs
-                if {$term ne ""} {
-                    lappend lines [_renderInlines $term $linkmode]
+            tableCell {
+                # content ist Inline-Liste
+                set errors [concat $errors [docir::_validateInlines $i tableCell $content]]
+            }
+            image {
+                # Block-Image: content {}, meta.url required
+                if {$content ne {}} {
+                    lappend errors "Node $i (image block): content muss {} sein (meta hat alt/url/title)"
                 }
-                if {$desc ne ""} {
-                    lappend lines [_renderInlines $desc $linkmode]
+                if {![dict exists $meta url]} {
+                    lappend errors "Node $i (image block): meta.url fehlt"
                 }
-                lappend lines ""
+            }
+            footnote_section {
+                # content ist Liste von footnote_def-Nodes
+                set j 0
+                foreach fnDef $content {
+                    incr j
+                    if {![dict exists $fnDef type] || [dict get $fnDef type] ne "footnote_def"} {
+                        lappend errors "Node $i (footnote_section), Item $j: muss type footnote_def haben"
+                    }
+                }
+            }
+            footnote_def {
+                # content = Inline-Liste der Definition
+                # meta.id required, meta.num optional Display-Marker
+                if {![dict exists $meta id]} {
+                    lappend errors "Node $i (footnote_def): meta.id fehlt"
+                }
+                set errors [concat $errors [docir::_validateInlines $i footnote_def $content]]
+            }
+            div {
+                # TIP-700 Container: content = Liste von Block-Nodes
+                # meta.class und meta.id sind optional
+                # Wir validieren nicht rekursiv (sonst würde es kompliziert);
+                # docir::validate sollte für alle Top-Level-Blocks aufgerufen
+                # werden. Aber mindestens prüfen dass content eine Liste ist.
+                if {![string is list $content]} {
+                    lappend errors "Node $i (div): content muss eine Block-Liste sein"
+                }
             }
         }
     }
-
-    return [join $lines \n]
+    return $errors
 }
 
-# --- Check if inline list has formatting ---
-
-proc ast2md::_hasFormatting {inlines} {
-    if {$inlines eq ""} { return 0 }
+proc docir::_validateInlines {nodeIdx nodeType inlines} {
+    variable inlineTypes
+    set errors {}
+    set j 0
     foreach inline $inlines {
-        if {![dict exists $inline type]} continue
-        set itype [dict get $inline type]
-        if {$itype eq "strong" || $itype eq "emphasis"} {
-            return 1
+        incr j
+        if {![dict exists $inline type]} {
+            lappend errors "Node $nodeIdx ($nodeType), Inline $j: 'type' fehlt"
+            continue
         }
+        set itype [dict get $inline type]
+        if {$itype ni $inlineTypes} {
+            lappend errors "Node $nodeIdx ($nodeType), Inline $j: Unbekannter Inline-Typ '$itype'"
+            continue
+        }
+        # Pro-Typ Required-Field-Prüfung
+        switch -- $itype {
+            link {
+                # link braucht: text, name, section
+                foreach f {name section} {
+                    if {![dict exists $inline $f]} {
+                        lappend errors "Node $nodeIdx, Inline $j (link): Feld '$f' fehlt"
+                    }
+                }
+                if {![dict exists $inline text]} {
+                    lappend errors "Node $nodeIdx, Inline $j (link): Feld 'text' fehlt"
+                }
+            }
+            image {
+                # image braucht: text (alt), url
+                if {![dict exists $inline text]} {
+                    lappend errors "Node $nodeIdx, Inline $j (image): Feld 'text' (= alt) fehlt"
+                }
+                if {![dict exists $inline url]} {
+                    lappend errors "Node $nodeIdx, Inline $j (image): Feld 'url' fehlt"
+                }
+            }
+            linebreak -
+            softbreak {
+                # line/soft breaks have no required fields -- no text needed
+            }
+            footnote_ref {
+                # footnote_ref braucht: text, id
+                if {![dict exists $inline text]} {
+                    lappend errors "Node $nodeIdx, Inline $j (footnote_ref): Feld 'text' fehlt"
+                }
+                if {![dict exists $inline id]} {
+                    lappend errors "Node $nodeIdx, Inline $j (footnote_ref): Feld 'id' fehlt"
+                }
+            }
+            default {
+                # text, strong, emphasis, underline, strike, code, span:
+                # alle brauchen 'text'
+                if {![dict exists $inline text]} {
+                    lappend errors "Node $nodeIdx ($nodeType), Inline $j ($itype): Feld 'text' fehlt"
+                }
+            }
+        }
+    }
+    return $errors
+}
+
+# ============================================================
+# docir::schemaVersion -- Liest die IR-Schema-Version aus dem Stream
+#
+# Sucht den ersten doc_meta-Block und gibt dessen meta.irSchemaVersion
+# zurück. Wenn kein doc_meta-Block vorkommt, wird 0 zurückgegeben
+# ("unversioniert", entspricht IRs aus Zeit vor irSchemaVersion).
+#
+# Der Validator akzeptiert IRs ohne doc_meta weiterhin (lenient mode).
+# Renderer können mit checkSchemaVersion eine eigene Strict-Prüfung
+# machen.
+# ============================================================
+
+proc docir::schemaVersion {ir} {
+    foreach node $ir {
+        if {![dict exists $node type]} continue
+        if {[dict get $node type] ne "doc_meta"} continue
+        set meta [expr {[dict exists $node meta] ? [dict get $node meta] : {}}]
+        if {[dict exists $meta irSchemaVersion]} {
+            return [dict get $meta irSchemaVersion]
+        }
+        return 0
     }
     return 0
 }
 
-# --- Inline rendering (with Markdown formatting) ---
+# ============================================================
+# docir::checkSchemaVersion -- Prüft IR gegen erlaubte Versionen
+#
+# Args:
+#   ir         -- DocIR-Stream
+#   supported  -- Liste erlaubter Versionen. Default: alle die der
+#                 Hub kennt (::docir::SUPPORTED_SCHEMA_VERSIONS).
+#                 Renderer können enger sein, z.B. {1}.
+#   strict     -- 0 (default): unversionierte IRs (Version 0) werden
+#                 toleriert. 1: Version 0 ist Fehler.
+#
+# Rückgabe:
+#   {} wenn ok, sonst Fehler-String.
+# ============================================================
 
-proc ast2md::_renderInlines {inlines {linkmode none}} {
-    if {$inlines eq ""} { return "" }
-    set result ""
-    foreach inline $inlines {
+proc docir::checkSchemaVersion {ir {supported {}} {strict 0}} {
+    variable SUPPORTED_SCHEMA_VERSIONS
+    if {$supported eq ""} {
+        set supported $SUPPORTED_SCHEMA_VERSIONS
+    }
+    set v [docir::schemaVersion $ir]
+    if {$v == 0} {
+        if {$strict} {
+            return "DocIR ohne doc_meta-Block (irSchemaVersion fehlt) im strict-Modus abgelehnt; erlaubt: $supported"
+        }
+        return ""
+    }
+    if {$v in $supported} {
+        return ""
+    }
+    return "DocIR-Schema-Version $v wird nicht unterstützt; erlaubt: $supported"
+}
+
+# ============================================================
+# docir::dump -- Pretty-Print eines DocIR-Streams
+#
+# Gibt jeden Block-Typ des IR als eine Zeile aus (Kinder von list,
+# table, footnote_section und div eingerückt darunter). Fehlende
+# content/meta-Felder (z.B. blank ohne content) gelten als {}.
+# Alle Labels stehen in escapten Klammern -- "[paragraph]" im
+# String wäre sonst eine Command-Substitution.
+# ============================================================
+
+proc docir::dump {ir {indent 0}} {
+    set pad [string repeat "  " $indent]
+    set out ""
+    foreach node $ir {
+        set type    [docir::_field $node type "?"]
+        set content [docir::_field $node content]
+        set meta    [docir::_field $node meta]
+
+        switch -- $type {
+            doc_meta {
+                set v [docir::_field $meta irSchemaVersion "?"]
+                append out "${pad}\[doc_meta\] irSchemaVersion=$v\n"
+            }
+            doc_header {
+                set name    [docir::_field $meta name "?"]
+                set section [docir::_field $meta section]
+                set part    [docir::_field $meta part]
+                append out "${pad}\[doc_header\] $name\($section\) $part\n"
+            }
+            heading {
+                set lvl [docir::_field $meta level "?"]
+                set txt [docir::_inlinesToText $content]
+                set hdr [expr {[string is integer -strict $lvl]
+                    ? [string repeat "#" $lvl] : "#?"}]
+                append out "${pad}${hdr} $txt\n"
+            }
+            paragraph {
+                set txt [docir::_inlinesToText $content]
+                append out "${pad}\[paragraph\] «[docir::_preview $txt 60]»\n"
+                append out [docir::_dumpInlines $content "${pad}  "]
+            }
+            pre {
+                set kind [docir::_field $meta kind]
+                set kind [expr {$kind ne "" ? " ($kind)" : ""}]
+                set txt  [docir::_inlinesToText $content]
+                append out "${pad}\[pre$kind\] «[docir::_preview $txt 50]»\n"
+            }
+            math_block {
+                set txt [docir::_inlinesToText $content]
+                append out "${pad}\[math_block\] «[docir::_preview $txt 50]»\n"
+            }
+            list {
+                set kind [docir::_field $meta kind "?"]
+                set il   [docir::_field $meta indentLevel 0]
+                append out "${pad}\[list kind=$kind indent=$il items=[llength $content]\]\n"
+                foreach item $content {
+                    append out [docir::_dumpListItem $item "${pad}  " [expr {$indent + 2}]]
+                }
+            }
+            listItem {
+                # Normalerweise innerhalb list.content -- auf Top-Level
+                # (z.B. in Tests) genauso ausgeben
+                set kind [docir::_field $meta kind "?"]
+                append out "${pad}\[listItem kind=$kind\]\n"
+                append out [docir::_dumpListItem $node "${pad}  " [expr {$indent + 2}]]
+            }
+            blank {
+                set l [docir::_field $meta lines 1]
+                append out "${pad}\[blank lines=$l\]\n"
+            }
+            hr {
+                append out "${pad}\[hr\]\n"
+            }
+            table {
+                set cols [docir::_field $meta columns "?"]
+                append out "${pad}\[table cols=$cols rows=[llength $content]\]\n"
+                foreach row $content {
+                    append out [docir::_dumpRow $row "${pad}  "]
+                }
+            }
+            tableRow {
+                # Sollte nur in einer Tabelle vorkommen
+                append out "${pad}\[tableRow\] (orphan, normalerweise innerhalb table)\n"
+                append out [docir::_dumpRow $node "${pad}  "]
+            }
+            tableCell {
+                set txt [docir::_inlinesToText $content]
+                append out "${pad}\[tableCell\] (orphan, normalerweise innerhalb table) «[docir::_preview $txt 40]»\n"
+            }
+            image {
+                set url [docir::_field $meta url "?"]
+                set alt [docir::_field $meta alt]
+                append out "${pad}\[image\] $url alt=«$alt»\n"
+            }
+            footnote_section {
+                append out "${pad}\[footnote_section\] [llength $content] defs\n"
+                foreach fnDef $content {
+                    set fnMeta [docir::_field $fnDef meta]
+                    set id  [docir::_field $fnMeta id "?"]
+                    set num [docir::_field $fnMeta num]
+                    set txt [docir::_inlinesToText [docir::_field $fnDef content]]
+                    append out "${pad}  \[$num\] id=$id «[docir::_preview $txt 40]»\n"
+                }
+            }
+            footnote_def {
+                # Sollte normalerweise innerhalb footnote_section sein
+                set id  [docir::_field $meta id "?"]
+                set txt [docir::_inlinesToText $content]
+                append out "${pad}\[footnote_def id=$id\] «[docir::_preview $txt 40]»\n"
+            }
+            div {
+                set cls [docir::_field $meta class]
+                set id  [docir::_field $meta id]
+                set attrs ""
+                if {$cls ne ""} { append attrs " class=$cls" }
+                if {$id  ne ""} { append attrs " id=$id" }
+                append out "${pad}\[div$attrs\] [llength $content] children\n"
+                # Rekursiv die child-blocks dumpen
+                append out [docir::dump $content [expr {$indent + 1}]]
+            }
+            default {
+                append out "${pad}\[$type\] (unbekannt)\n"
+            }
+        }
+    }
+    return $out
+}
+
+# Dict-Feld mit Default (für optionale content/meta/Meta-Keys)
+proc docir::_field {d key {default ""}} {
+    if {[catch {dict exists $d $key} ok] || !$ok} { return $default }
+    return [dict get $d $key]
+}
+
+proc docir::_preview {txt n} {
+    set p [string range $txt 0 $n]
+    if {[string length $txt] > $n + 1} { append p "…" }
+    return $p
+}
+
+# Ein Listen-Item: neue Form (listItem-Node, meta.term + content=desc,
+# optional blocks) oder Legacy-Form {term .. desc ..}.
+proc docir::_dumpListItem {item pad blockIndent} {
+    if {[docir::_field $item type] eq "listItem"} {
+        set term [docir::_field [docir::_field $item meta] term]
+        set desc [docir::_field $item content]
+    } else {
+        set term [docir::_field $item term]
+        set desc [docir::_field $item desc]
+    }
+    set tprev [string range [docir::_inlinesToText $term] 0 30]
+    set dprev [string range [docir::_inlinesToText $desc] 0 40]
+    set out "${pad}• «$tprev» → «$dprev»\n"
+    set blocks [docir::_field $item blocks]
+    if {[llength $blocks]} {
+        append out [docir::dump $blocks $blockIndent]
+    }
+    return $out
+}
+
+proc docir::_dumpRow {row pad} {
+    set kind  [docir::_field [docir::_field $row meta] kind]
+    set kind  [expr {$kind ne "" ? " $kind" : ""}]
+    set cells {}
+    foreach cell [docir::_field $row content] {
+        lappend cells [string range \
+            [docir::_inlinesToText [docir::_field $cell content]] 0 20]
+    }
+    return "${pad}\[row$kind\] [join $cells { | }]\n"
+}
+
+proc docir::_inlinesToText {inlines} {
+    set t ""
+    foreach i $inlines {
+        if {![catch {dict exists $i text} ok] && $ok} { append t [dict get $i text] }
+    }
+    return $t
+}
+
+proc docir::_dumpInlines {inlines pad} {
+    set out ""
+    foreach i $inlines {
+        set type [docir::_field $i type "?"]
+        if {$type eq "text"} continue  ;# text-Inlines nicht einzeln zeigen
+        set text [if {[dict exists $i text]} {dict get $i text} else {lindex ""}]
+        append out "${pad}<$type> «$text»\n"
+    }
+    return $out
+}
+
+# ============================================================
+# docir::diff -- Vergleicht zwei DocIR-Streams
+# Gibt Liste von Unterschieden zurück
+# ============================================================
+
+proc docir::diff {irA irB {label ""}} {
+    set diffs {}
+    set lenA [llength $irA]
+    set lenB [llength $irB]
+
+    if {$lenA != $lenB} {
+        lappend diffs "Länge verschieden: A=$lenA B=$lenB"
+    }
+
+    set n [expr {min($lenA, $lenB)}]
+    for {set i 0} {$i < $n} {incr i} {
+        set nA [lindex $irA $i]
+        set nB [lindex $irB $i]
+        set tA [dict get $nA type]
+        set tB [dict get $nB type]
+        if {$tA ne $tB} {
+            lappend diffs "Node [expr {$i+1}]: Typ A=$tA B=$tB"
+        } else {
+            # Meta-Vergleich
+            set mA [dict get $nA meta]
+            set mB [dict get $nB meta]
+            if {$mA ne $mB} {
+                lappend diffs "Node [expr {$i+1}] ($tA): meta verschieden\n  A: $mA\n  B: $mB"
+            }
+            # Inline-Textvergleich
+            set txtA [docir::_inlinesToText [docir::_contentInlines $nA]]
+            set txtB [docir::_inlinesToText [docir::_contentInlines $nB]]
+            if {$txtA ne $txtB} {
+                set pA [string range $txtA 0 40]
+                set pB [string range $txtB 0 40]
+                lappend diffs "Node [expr {$i+1}] ($tA): Text verschieden\n  A: «$pA»\n  B: «$pB»"
+            }
+        }
+    }
+    return $diffs
+}
+
+proc docir::_contentInlines {node} {
+    set type    [dict get $node type]
+    set content [dict get $node content]
+    switch $type {
+        paragraph - heading - pre { return $content }
+        default                   { return {} }
+    }
+}
+
+# ============================================================
+# docir::typeSeq -- Nur die Typ-Sequenz (für Tests)
+# ============================================================
+
+proc docir::typeSeq {ir} {
+    set seq {}
+    foreach node $ir { lappend seq [dict get $node type] }
+    return $seq
+}
+
+# ===========================================================================
+# EMBEDDED: docir/roffSource-0.1.tm
+# ===========================================================================
+
+# docir-roff-0.1.tm – Mapper: nroff-AST → DocIR
+#
+# Converts the AST from nroffparser-0.2 into a DocIR stream.
+# No parser rework needed – a pure mapping layer.
+#
+# Namespace: ::docir::roff
+# Tcl 8.6+ / 9.x kompatibel
+#
+# 2026-06-20: doc_header meta fields are un-escaped (version "0\&.10" →
+#   "0.10"); redundant blank nodes after self-separating blocks
+#   (paragraph/heading/list/pre/table/...) are discarded, so that `.sp`
+#   between SYNOPSIS lines does not lead to triple spacing.
+
+package provide docir::roffSource 0.1
+package require Tcl 8.6-
+package require docir 0.1
+
+namespace eval ::docir::roff {}
+
+# ============================================================
+# docir::roff::fromAst -- Haupteinstiegspunkt
+#
+# Argumente:
+#   ast  - return value of nroffparser::parse
+#
+# Returns:
+#   DocIR stream (list of block nodes)
+# ============================================================
+
+proc docir::roff::_dictDef {d k {def ""}} {
+    if {[dict exists $d $k]} { return [dict get $d $k] }
+    return $def
+}
+
+proc docir::roff::fromAst {ast} {
+    set ir {}
+    # doc_meta als allererster Block (irSchemaVersion seit 0.5).
+    # Always emitted, even if the nroff AST has no .TH.
+    lappend ir [dict create \
+        type    doc_meta \
+        content {} \
+        meta    [dict create irSchemaVersion 1]]
+    # Transient flag: the next pre node should be mapped as a table,
+    # if possible. Set on .SH STANDARD OPTIONS or similar
+    # and cleared again after processing the next pre.
+    set expectStdOptionsTable 0
+
+    foreach node $ast {
+        set type    [dict get $node type]
+        set content [_dictDef $node content {}]
+        set meta    [expr {[dict exists $node meta]    ? [dict get $node meta]    : {}}]
+
+        switch $type {
+
+            heading {
+                # .TH → doc_header
+                # Header meta fields can carry nroff escapes (e.g. doctools
+                # writes the version as "0\&.10" to protect the dot) — unescape
+                # them like normal text so they don't show up literally.
+                lappend ir [dict create \
+                    type    doc_header \
+                    content {} \
+                    meta    [dict create \
+                        name    [docir::roff::_unescapeNroff [if {[dict exists $meta name]} {dict get $meta name} else {lindex ""}]] \
+                        section [docir::roff::_unescapeNroff [_dictDef $meta section ""]] \
+                        version [docir::roff::_unescapeNroff [_dictDef $meta version ""]] \
+                        part    [docir::roff::_unescapeNroff [if {[dict exists $meta part]} {dict get $meta part} else {lindex ""}]]]]
+            }
+
+            section {
+                # .SH → heading level=1
+                set txt [docir::roff::_inlinesToText $content]
+                set id  [docir::roff::_makeId $txt]
+                # Mark: the next pre should be tried as a table,
+                # if the section is called "STANDARD OPTIONS" (case-insens.)
+                set normTxt [string toupper [string trim $txt]]
+                if {$normTxt eq "STANDARD OPTIONS"} {
+                    set expectStdOptionsTable 1
+                } else {
+                    set expectStdOptionsTable 0
+                }
+                lappend ir [dict create \
+                    type    heading \
+                    content [docir::roff::_mapInlines $content] \
+                    meta    [dict create level 1 id $id]]
+            }
+
+            subsection {
+                # .SS → heading level=2
+                set txt [docir::roff::_inlinesToText $content]
+                set id  [docir::roff::_makeId $txt]
+                lappend ir [dict create \
+                    type    heading \
+                    content [docir::roff::_mapInlines $content] \
+                    meta    [dict create level 2 id $id]]
+            }
+
+            paragraph {
+                set inlines [docir::roff::_mapInlines $content]
+                if {[llength $inlines] > 0} {
+                    # meta.version: Absatz zwischen .VS und .VE (nroffparser)
+                    set pmeta {}
+                    if {[dict exists $meta version]} {
+                        dict set pmeta version [dict get $meta version]
+                    }
+                    lappend ir [dict create \
+                        type    paragraph \
+                        content $inlines \
+                        meta    $pmeta]
+                }
+            }
+
+            pre {
+                set kind [_dictDef $meta kind "code"]
+
+                # If we are right after .SH STANDARD OPTIONS, try
+                # to map the pre block as a table. If that does not
+                # gelingt (z.B. inkonsistente Spaltenzahl), bleibt's pre.
+                set tableNode {}
+                if {$expectStdOptionsTable} {
+                    set tableNode [docir::roff::_tryStandardOptionsTable $content]
+                    set expectStdOptionsTable 0
+                }
+                if {[llength $tableNode] > 0} {
+                    lappend ir $tableNode
+                } else {
+                    lappend ir [dict create \
+                        type    pre \
+                        content [docir::roff::_mapInlines $content] \
+                        meta    [dict create kind $kind]]
+                }
+            }
+
+            list {
+                set kind [expr {[dict exists $meta kind]        ? [dict get $meta kind]        : "tp"}]
+                set il   [_dictDef $meta indentLevel 0]
+                set items {}
+                foreach item $content {
+                    set term [_dictDef $item term {}]
+                    set desc [_dictDef $item desc {}]
+                    set termIr [docir::roff::_mapInlines $term]
+                    set descIr [docir::roff::_mapInlines $desc]
+                    # listItem as a complete DocIR node
+                    lappend items [dict create \
+                        type    listItem \
+                        content $descIr \
+                        meta    [dict create kind $kind term $termIr]]
+                }
+                lappend ir [dict create \
+                    type    list \
+                    content $items \
+                    meta    [dict create kind $kind indentLevel $il]]
+            }
+
+            blank {
+                # `.sp` / blank lines become blank nodes. But most block types
+                # (paragraph, heading, list, pre, table, doc_header) already
+                # render with a trailing blank line, so an extra blank node on
+                # top triples the gap — e.g. SYNOPSIS entries separated by `.sp`.
+                # Drop the blank when the previously emitted node already
+                # self-separates; keep it only between tight/inline content.
+                set prevType ""
+                if {[llength $ir]} { set prevType [dict get [lindex $ir end] type] }
+                if {$prevType ni {paragraph heading list pre table doc_header blank hr}} {
+                    set lines [_dictDef $meta lines 1]
+                    lappend ir [dict create \
+                        type    blank \
+                        content {} \
+                        meta    [dict create lines $lines]]
+                }
+            }
+
+            default {
+                # skip unknown types
+            }
+        }
+    }
+    return $ir
+}
+
+# ============================================================
+# Interne Helfer
+# ============================================================
+
+# _unescapeNroff -- resolves nroff escape sequences in a raw string.
+#
+# Needed for text fields that did not go through nroffparser::parseInlines
+# — typically .OP terms (format "cmdName|dbName|dbClass"
+# as a raw string) and similar list-term strings.
+#
+# Behandelt:
+#   \-   → -    (literal hyphen, the bug trigger)
+#   \.   → .    (literal period)
+#   \&   →      (zero-width space, removed)
+#   \\   → \    (literal backslash)
+#   \fB \fI \fR \fP  →  (removed — in a plain string we cannot
+#                        track bold/italic states; this is
+#                        a documented loss for term strings)
+#
+# Die Funktion arbeitet konservativ: unbekannte Escape-Sequenzen bleiben
+# unchanged (better than a wrong replacement).
+proc docir::roff::_unescapeNroff {s} {
+    # Order matters: \\  first (otherwise the other
+    # rules would also apply to double backslashes)
+    set s [string map {
+        "\\\\" "\x01"
+        "\\-"  "-"
+        "\\."  "."
+        "\\&"  ""
+        "\\fB" ""
+        "\\fI" ""
+        "\\fR" ""
+        "\\fP" ""
+        "\\e"  "\\"
+    } $s]
+    # placeholder for \\\\ → real backslash
+    return [string map {"\x01" "\\"} $s]
+}
+
+proc docir::roff::_mapInlines {content} {
+    # content kann sein:
+    #   - list of inline dicts {type text text ...}
+    #   - Rohstring (alt, Fallback)
+    #   - empty list {}
+
+    if {[llength $content] == 0} { return {} }
+
+    # Check: is the first element a dict with a 'type' key?
+    set first [lindex $content 0]
+    if {[catch {dict exists $first type} ok] || !$ok} {
+        # raw string → text inline. First resolve nroff escapes
+        # (z.B. .OP-Terms kommen als Rohstring "\\-autoseparators|...")
+        return [list [dict create type text text [_unescapeNroff $content]]]
+    }
+
+    # Inline-Dicts: text-Felder ebenfalls von Rohescapes befreien
+    # (the parser handled most of it already, but not all paths —
+    #  e.g. nroff list items where the term went through parseInlines
+    #  but individual inlines still have leftover artifacts).
+
+    # Inline-Dicts mappen
+    set result {}
+    foreach inline $content {
         if {![dict exists $inline type]} continue
         set itype [dict get $inline type]
-        set itext ""
-        if {[dict exists $inline text]} {
-            set itext [dict get $inline text]
-        } elseif {[dict exists $inline value]} {
-            set itext [dict get $inline value]
-        }
-        switch -- $itype {
-            text     { append result $itext }
-            strong   { append result "**${itext}**" }
-            emphasis { append result "*${itext}*" }
+        set text  [_dictDef $inline text ""]
+
+        switch $itype {
+            text      { lappend result [dict create type text      text $text] }
+            strong    { lappend result [dict create type strong    text $text] }
+            emphasis  { lappend result [dict create type emphasis  text $text] }
+            underline { lappend result [dict create type underline text $text] }
             link {
-                set name [expr {[dict exists $inline name] ? [dict get $inline name] : $itext}]
-                switch -- $linkmode {
-                    server { append result "\[$itext](/$name)" }
-                    file   { append result "\[$itext](${name}.md)" }
-                    default { append result $itext }
-                }
+                set name    [if {[dict exists $inline name]} {dict get $inline name} else {lindex $text}]
+                set section [_dictDef $inline section "n"]
+                set href [_dictDef $inline href ""]
+                lappend result [dict create type link text $text name $name section $section href $href]
             }
-            default  { append result $itext }
+            default {
+                # take unknown inlines as text
+                lappend result [dict create type text text $text]
+            }
         }
     }
-    # Clean up double spaces
-    regsub -all {  +} $result { } result
-    return [string trim $result]
+    return $result
 }
 
-# --- Inline rendering (plain text, no formatting) ---
+proc docir::roff::_inlinesToText {content} {
+    set t ""
+    if {[llength $content] == 0} { return "" }
+    set first [lindex $content 0]
+    if {[catch {dict exists $first type} ok] || !$ok} {
+        return $content
+    }
+    foreach i $content {
+        if {[dict exists $i text]} { append t [dict get $i text] }
+    }
+    return $t
+}
 
-proc ast2md::_renderInlinesPlain {inlines} {
-    if {$inlines eq ""} { return "" }
-    set result ""
-    foreach inline $inlines {
-        if {![dict exists $inline type]} continue
-        set itext ""
+proc docir::roff::_makeId {text} {
+    set id [string tolower $text]
+    set id [string map {" " - "/" - "\"" "" "'" "" "(" "" ")" ""} $id]
+    set id [regsub -all {[^a-z0-9\-]} $id ""]
+    return $id
+}
+
+# ============================================================
+# _tryStandardOptionsTable -- tries to convert a pre block from a
+# .SO/.SE section into a DocIR table node.
+#
+# Argumente:
+#   content - list of inline dicts from the pre block
+#
+# Returns:
+#   table node dict on success, empty list on failure.
+#
+# Strategie:
+#   1. join inlines into plain text.
+#   2. An \n in Zeilen splitten.
+#   3. split each line at \t into cells.
+#   4. check consistency (same column count in each row,
+#      at least 2 rows with at least 2 columns).
+#   5. tableRow/tableCell-Nodes bauen.
+#
+# cell content is a plain-text inline. Tk .SO options are
+# identifiers like "-background" — we wrap them in strong because
+# the nroff source had \fB...\fR around them (which the parser
+# pre-Mode aber als plain text durchgereicht wurde — Detail unten).
+# ============================================================
+
+proc docir::roff::_tryStandardOptionsTable {content} {
+    # build plain text from inlines
+    set text ""
+    foreach inline $content {
         if {[dict exists $inline text]} {
-            set itext [dict get $inline text]
-        } elseif {[dict exists $inline value]} {
-            set itext [dict get $inline value]
+            append text [dict get $inline text]
         }
-        append result $itext
     }
-    return [string trim $result]
+
+    # In Zeilen splitten, Leerzeilen verwerfen
+    set rawLines [split $text "\n"]
+    set lines {}
+    foreach ln $rawLines {
+        set ln [string trim $ln]
+        if {$ln ne ""} { lappend lines $ln }
+    }
+    if {[llength $lines] == 0} { return {} }
+
+    # determine the max column count over all rows. Inconsistent
+    # Tk manpages (ttk_progressbar etc.) have non-uniform
+    # column counts per row — we take the maximum and fill
+    # shorter rows with empty cells.
+    set numCols 0
+    foreach ln $lines {
+        set cols [llength [split $ln "\t"]]
+        if {$cols > $numCols} { set numCols $cols }
+    }
+    if {$numCols < 2} { return {} }
+
+    # check all rows: same column count?
+    # the last row may have fewer columns (typical in Tk manpages —
+    # a "filler" row at the end). Tolerant mode: all rows with
+    # fewer columns than firstCols are padded with empty cells.
+    set rows {}
+    foreach ln $lines {
+        set cells [split $ln "\t"]
+        # pad if shorter
+        while {[llength $cells] < $numCols} {
+            lappend cells ""
+        }
+
+        set rowCells {}
+        foreach cell $cells {
+            set cellText [string trim $cell]
+            # Tk standard options are identifiers like "-background",
+            # in the nroff source as \fB...\fR (bold). We output them
+            # as a strong inline, so the renderer displays them
+            # appropriately. Empty cells → empty content list.
+            if {$cellText eq ""} {
+                set inlines {}
+            } else {
+                set inlines [list [dict create type strong text $cellText]]
+            }
+            lappend rowCells [dict create \
+                type    tableCell \
+                content $inlines \
+                meta    {}]
+        }
+        lappend rows [dict create \
+            type    tableRow \
+            content $rowCells \
+            meta    {}]
+    }
+
+    return [dict create \
+        type    table \
+        content $rows \
+        meta    [dict create columns $numCols hasHeader 0 source standardOptions]]
 }
 
-# --- TIP-700 Synopsis rendering ---
+# ===========================================================================
+# EMBEDDED: docir/md-0.1.tm
+# ===========================================================================
+
+# docir-md-0.1.tm -- DocIR -> Markdown renderer (sink)
 #
-# Konvertiert eine Synopsis-Inline-Liste in TIP-700-bracketed-spans.
-# Wird nur in .SH SYNOPSIS-Sections aufgerufen wenn -tip700 true.
+# Converts a DocIR sequence into a Markdown file. The sixth sink
+# im DocIR-Hub (neben tk, html, svg, pdf, canvas).
 #
-# Klassen-Vergabe nach TIP-700-Spec (700.md Tabelle):
-#   .cmd     erstes literal-Wort         (bold, command)
-#   .sub     zweites literal-Wort        (bold, subcommand) — direkt nach .cmd
-#   .lit     weiteres literal-Wort       (bold, mandatory literal)
-#   .arg     emphasis-Wort               (italic, mandatory argument)
-#   .optarg  arg in ?...?                (italic, optional)
-#   .optlit  lit in ?...?                (bold, optional)
-#   .optdot  arg mit "..."-Suffix in ?...? (italic, optional repetitive)
-#   .ins     erstes emphasis als command (italic, instance command name)
+# Relation to docir::mdSource: this here is the SINK (DocIR -> MD,
+# `docir::md::render`). Die QUELLE (MD-AST -> DocIR, `docir::md::fromAst`)
+# lebt im separaten Paket `docir::mdSource`. Beide Module schreiben in
+# the same namespace `::docir::md::*`, but with different
+# procs -- they can be loaded SIMULTANEOUSLY without problems:
 #
-# Heuristik (vereinfachte erste Iteration):
-#   - Mehrwort-strong wird gesplittet: erstes Wort kriegt primäre Rolle,
-#     weitere Wörter kriegen .sub bzw. .lit basierend auf Position.
-#   - emphasis-Inhalt mit "..." am Ende → .optdot wenn in Gruppe,
-#     sonst .arg. Pattern: "wort wort ..." oder "wort ...".
-#   - Gruppen ?...? werden durch text-Inlines mit "?"-Zeichen erkannt
-#     (Fragezeichen abwechselnd öffnend/schließend).
-#   - Komplexe Gruppen wie ?-code code? mit lit+arg drin werden in
-#     dieser Iteration als zwei separate Spans behandelt:
-#       [-code]{.optlit} [code]{.optarg}
-#     statt der spec-konformen verschachtelten Form
-#       [[-code]{.lit} [code]{.arg}]{.optarg}
-#     Das ist Markdown-konform und TIP-700-Klassen-konsistent;
-#     die verschachtelte Form ist eine spätere Verfeinerung.
+#   package require docir::md          ;# Sink (DocIR -> MD)
+#   package require docir::mdSource    ;# Source (MD-AST -> DocIR)
+#
+# A round trip Markdown -> DocIR -> Markdown is therefore possible.
+#
+# Public API:
+#   docir::md::render ir ?options?
+#       options: dict with
+#         linkResolve  Tcl cmd prefix       (optional, for link inlines with name/section)
+#         listMarker   "-" | "+" | "*"     (default "-")
+#         strongStyle  "**" | "__"          (default "**")
+#         emphStyle    "*" | "_"             (default "*")
+#       Returns: Markdown-String
+#
+#   docir::md::renderInline inlines
+#       Converts an inline list into a Markdown fragment (without block wrap).
+#
+# Defensive Behandlung:
+#   - blank-Nodes ohne content → mehrfache Leerzeile
+#   - unbekannte Block-Typen → HTML-Kommentar als Marker, content
+#     is rendered as inline text (no crash)
+#   - Schema-Verletzungen in list.content / table.content → HTML-
+#     Kommentar als Warnung
+#   - Markdown escaping for text inlines (\*, \_, \`, \[, \])
 
-proc ast2md::_renderSynopsisInlines {inlines} {
-    if {$inlines eq ""} { return "" }
+package provide docir::md 0.1
+package require docir 0.1
 
-    # Phase 1: Tokenisierung in eine flache Liste logischer Tokens.
-    # Token-Formen:
-    #   {lit  WORT}    aus strong (literales Wort, später cmd/sub/lit)
-    #   {arg  WORT}    aus emphasis ohne "..." am Ende
-    #   {dot  STAMM}   aus emphasis mit "..."-Suffix (STAMM ohne "...")
-    #   {qmark}        aus text-Inline mit Fragezeichen
-    set tokens [_tokenizeSynopsis $inlines]
+namespace eval ::docir::md {
+    namespace export render renderInline
+    variable opts
+}
 
-    # Phase 2: Klassifizieren und Markdown ausgeben.
-    # State:
-    #   spans       — Output-Liste der Top-Level-Spans
-    #   inGroup     — 1 wenn wir in einer ?...?-Gruppe sind
-    #   groupTokens — Tokens innerhalb der aktuellen Gruppe
-    #   spanCount   — wieviele Top-Level-Spans bereits ausgegeben (für Position)
-    #   firstStrong — true bis zum ersten lit/arg-Token; entscheidet
-    #                 ob das erste arg ein .ins werden soll (kommt selten vor,
-    #                 nur bei pathName-Pattern). Hier konservativ: wir
-    #                 markieren als .ins nur wenn das allererste Token
-    #                 ein arg ist.
-    set spans       [list]
-    set inGroup     0
-    set groupTokens [list]
-    set spanCount   0
-    set firstSeen   0
+# ============================================================
+# Public API
+# ============================================================
 
-    foreach tok $tokens {
-        set tt [lindex $tok 0]
-        if {$tt eq "qmark"} {
-            if {!$inGroup} {
-                set inGroup 1
-                set groupTokens [list]
-            } else {
-                set inGroup 0
-                # Gruppe schließen: groupTokens auswerten
-                set groupSpans [_renderGroupSpans $groupTokens $spanCount]
-                foreach gs $groupSpans { lappend spans $gs; incr spanCount }
-                set groupTokens [list]
+proc docir::md::_dictDef {d k {def ""}} {
+    if {[dict exists $d $k]} { return [dict get $d $k] }
+    return $def
+}
+
+proc docir::md::render {ir {options {}}} {
+    variable opts
+    set opts [dict create \
+        linkResolve "" \
+        listMarker  "-" \
+        strongStyle "**" \
+        emphStyle   "*" \
+        headingShift "auto" \
+        opDbStrong  0]
+    foreach k [dict keys $options] {
+        dict set opts $k [dict get $options $k]
+    }
+
+    # Auto-shift: if there is a doc_header in the IR and headingShift="auto",
+    # shift all headings by +1 — so "# title" becomes the only h1,
+    # all .SH headings become h2 (consistent with ast2md output and
+    # allgemein besseres Markdown).
+    if {[dict get $opts headingShift] eq "auto"} {
+        set shift 0
+        foreach node $ir {
+            if {[dict get $node type] eq "doc_header"} {
+                set shift 1
+                break
             }
+        }
+        dict set opts headingShift $shift
+    }
+
+    set out ""
+    foreach node $ir {
+        append out [_renderBlock $node]
+    }
+    return "[string trimright $out]\n"
+}
+
+proc docir::md::renderInline {inlines} {
+    variable opts
+    if {![info exists opts] || $opts eq ""} {
+        set opts [dict create linkResolve "" listMarker "-" \
+                   strongStyle "**" emphStyle "*"]
+    }
+    return [_renderInlines $inlines]
+}
+
+# ============================================================
+# Block dispatcher
+# ============================================================
+
+proc docir::md::_renderBlock {node} {
+    set t [dict get $node type]
+    switch $t {
+        doc_header   { return [_renderDocHeader $node] }
+        heading      { return [_renderHeading $node] }
+        paragraph    { return [_renderParagraph $node] }
+        pre          { return [_renderPre $node] }
+        list         { return [_renderList $node] }
+        listItem     { return [_renderListItem $node] }
+        blank        { return [_renderBlank $node] }
+        hr           { return "---\n\n" }
+        table        { return [_renderTable $node] }
+        image        { return [_renderImageBlock $node] }
+        footnote_section { return [_renderFootnoteSection $node] }
+        footnote_def {
+            # Top-level footnote_def — shouldn't happen but handle gracefully
+            return [_renderFootnoteDef $node]
+        }
+        div          { return [_renderDiv $node] }
+        tableRow     -
+        tableCell    {
+            return "<!-- stray $t at top level -->\n\n"
+        }
+        default      {
+            if {[::docir::isSchemaOnly $t]} { return "" }
+            return [_renderUnknown $node "unknown block: $t"]
+        }
+    }
+}
+
+# ============================================================
+# Block renderers
+# ============================================================
+
+proc docir::md::_renderDocHeader {node} {
+    set m [dict get $node meta]
+    set name    [if {[dict exists $m name]} {dict get $m name} else {lindex ""}]
+    set section [_dictDef $m section ""]
+    set version [_dictDef $m version ""]
+    set part    [if {[dict exists $m part]} {dict get $m part} else {lindex ""}]
+    if {$name eq ""} { return "" }
+
+    # H1 is the name. Subtitle with additional fields.
+    set out "# [_escapeMd $name]"
+    if {$section ne ""} {
+        # nroff-Style: name(section) — z.B. "ls(1)"
+        append out "([_escapeMd $section])"
+    }
+    append out "\n\n"
+
+    # subtitle line with version/part, if present.
+    set subtitle {}
+    if {$version ne ""} { lappend subtitle [_escapeMd $version] }
+    if {$part    ne ""} { lappend subtitle [_escapeMd $part] }
+    if {[llength $subtitle] > 0} {
+        append out "*[join $subtitle { · }]*\n\n"
+    }
+    return $out
+}
+
+proc docir::md::_renderHeading {node} {
+    variable opts
+    set m [dict get $node meta]
+    set lv [_dictDef $m level 1]
+    set lv [expr {$lv + [dict get $opts headingShift]}]
+    if {$lv < 1} { set lv 1 }
+    if {$lv > 6} { set lv 6 }
+    set hashes [string repeat "#" $lv]
+    set txt [_renderInlines [dict get $node content]]
+    return "$hashes $txt\n\n"
+}
+
+proc docir::md::_renderParagraph {node} {
+    set m [dict get $node meta]
+    set class [_dictDef $m class ""]
+    set txt [_renderInlines [dict get $node content]]
+    if {$txt eq ""} { return "" }
+
+    if {$class eq "blockquote"} {
+        # > prefix for each line
+        set lines [split $txt "\n"]
+        set out ""
+        foreach line $lines {
+            append out "> $line\n"
+        }
+        return "$out\n"
+    }
+    return "$txt\n\n"
+}
+
+proc docir::md::_renderPre {node} {
+    set m [dict get $node meta]
+    set kind [_dictDef $m kind ""]
+    set lang [_dictDef $m language ""]
+
+    # In a code block: inline list as plain text (no Markdown escaping)
+    set content [dict get $node content]
+    if {[string is list $content] && [llength $content] > 0 \
+            && [catch {dict get [lindex $content 0] type}] == 0} {
+        set txt [_inlinesToText $content]
+    } else {
+        # Reiner String (z.B. von math_block via mdSource)
+        set txt $content
+    }
+
+    # Raw HTML block: goes back out as it came in -- no fence, no escaping.
+    # Fencing it would turn markup into a code listing on the round trip.
+    if {$kind eq "html"} {
+        return "$txt\n\n"
+    }
+
+    # Math-Display-Block als $$...$$ ausgeben
+    if {$kind eq "math"} {
+        return "\$\$\n$txt\n\$\$\n\n"
+    }
+
+    return "```$lang\n$txt\n```\n\n"
+}
+
+proc docir::md::_renderList {node} {
+    variable opts
+    set m [dict get $node meta]
+    set kind [_dictDef $m kind "ul"]
+    set indentLevel [_dictDef $m indentLevel 0]
+    # Per Indent-Level: 2 Spaces vor jedem Item (Markdown-Konvention)
+    set indent [string repeat "  " $indentLevel]
+
+    set out ""
+    set ord 1
+    foreach item [dict get $node content] {
+        set itemType [dict get $item type]
+        if {$itemType ne "listItem"} {
+            append out "<!-- schema warning: '$itemType' in list.content -->\n"
             continue
         }
 
-        if {$inGroup} {
-            lappend groupTokens $tok
-            continue
-        }
+        set itemMeta [dict get $item meta]
+        set itemKind [_dictDef $itemMeta kind $kind]
+        set itemTerm [_dictDef $itemMeta term {}]
+        set itemDescInlines [dict get $item content]
 
-        # Top-level Token — direkt klassifizieren
-        set txt [lindex $tok 1]
-        if {$tt eq "lit"} {
-            if {$spanCount == 0} {
-                # Erstes Wort: .cmd
-                lappend spans "\[$txt\]\{.cmd\}"
-                set firstSeen 1
-            } elseif {$spanCount == 1 && $firstSeen} {
-                # Direkt nach .cmd, kein arg dazwischen
-                if {[string index $txt 0] eq "-"} {
-                    lappend spans "\[$txt\]\{.lit\}"
-                } else {
-                    lappend spans "\[$txt\]\{.sub\}"
-                }
-            } else {
-                lappend spans "\[$txt\]\{.lit\}"
+        set descMd [_renderInlines $itemDescInlines]
+
+        switch $itemKind {
+            ol {
+                # If descMd contains newlines: indent the further lines
+                set descMd [_indentContinuationLines $descMd 4]
+                append out "${indent}${ord}. $descMd\n"
+                incr ord
             }
-            incr spanCount
-        } elseif {$tt eq "arg"} {
-            if {$spanCount == 0} {
-                # Erstes Wort ist ein arg → .ins (instance command name).
-                # Beispiel: "pathName addtag tag ..." aus .OP-Sektionen.
-                lappend spans "\[$txt\]\{.ins\}"
-                set firstSeen 1
-            } else {
-                lappend spans "\[$txt\]\{.arg\}"
-            }
-            incr spanCount
-        } elseif {$tt eq "dot"} {
-            # "stem ..." außerhalb Gruppe — .optdot ohne ?...?
-            # Selten, aber kommt vor. Spec-Form: [stem]{.optdot}
-            lappend spans "\[$txt\]\{.optdot\}"
-            incr spanCount
-        }
-    }
-
-    # Falls noch eine offene Gruppe — mit dem schließen was da ist
-    if {$inGroup && [llength $groupTokens] > 0} {
-        set groupSpans [_renderGroupSpans $groupTokens $spanCount]
-        foreach gs $groupSpans { lappend spans $gs }
-    }
-
-    return [join $spans " "]
-}
-
-# Tokenisiert eine Synopsis-Inline-Liste. Siehe _renderSynopsisInlines
-# für Token-Formen.
-proc ast2md::_tokenizeSynopsis {inlines} {
-    set tokens [list]
-    # prefix sammelt Strukturzeichen aus text-Inlines die nicht "?" sind,
-    # speziell "-" (von "?\fB-code...?"). Wird beim nächsten lit/arg
-    # vornedrangehängt und dann geleert.
-    set prefix ""
-    foreach inline $inlines {
-        if {![dict exists $inline type]} continue
-        set itype [dict get $inline type]
-        set itext ""
-        if {[dict exists $inline text]} {
-            set itext [dict get $inline text]
-        }
-        switch -- $itype {
-            strong {
-                # Mehrwort-strong → mehrere lit-Tokens
-                set first 1
-                foreach w [_splitWords $itext] {
-                    if {$w eq ""} continue
-                    if {$first && $prefix ne ""} {
-                        set w "${prefix}${w}"
-                        set prefix ""
-                    }
-                    lappend tokens [list lit $w]
-                    set first 0
-                }
-            }
-            emphasis {
-                # emphasis-Text kann sein:
-                #   "single"          → ein arg-Token mit Wert "single"
-                #   "two words"       → zwei arg-Tokens (each Wort einzeln)
-                #   "stem ..."        → ein dot-Token mit STAMM (kann
-                #                       mehrere Wörter haben, wird im
-                #                       optdot-Span als Ganzes ausgegeben)
-                #   "..."             → ein dot-Token mit Stamm "..."
-                set t [string trim $itext]
-                if {$t eq ""} continue
-                # "..."-Suffix abspalten
-                set hasDot 0
-                if {[regexp {^(.*?)\s*\.\.\.$} $t -> stem]} {
-                    set hasDot 1
-                    set t [string trim $stem]
-                }
-                if {$hasDot} {
-                    # Mehrwort-Stamm bleibt in EINEM dot-Token, damit
-                    # daraus später ein einzelner [stem]{.optdot}-Span
-                    # entsteht — nicht "[stem]{.optdot} ..." getrennt.
-                    if {$t eq ""} {
-                        if {$prefix ne ""} {
-                            lappend tokens [list dot "${prefix}..."]
-                            set prefix ""
-                        } else {
-                            lappend tokens [list dot "..."]
-                        }
-                    } else {
-                        if {$prefix ne ""} { set t "${prefix}${t}"; set prefix "" }
-                        lappend tokens [list dot $t]
+            tp - ip - op - ap - dl {
+                # Definitionsliste: Begriff fett, darunter ": Beschreibung".
+                #
+                # Bis 2026-10-21: Beschreibung nach einer Leerzeile mit 4
+                # Leerzeichen eingerueckt. Nach einem Absatz und einer
+                # Leerzeile ist das in Markdown ein CODEBLOCK -- jede
+                # Optionsbeschreibung einer Handbuchseite erschien als
+                # Code (gemessen mit n2md an canvas.n). ": " verstehen
+                # mdstack/mdserver, pandoc und PHP Markdown Extra.
+                #
+                # Immer ab Spalte 0, auch verschachtelt (.RS/.TP in .TP):
+                # mdstack erkennt ": " nur am Zeilenanfang, und 4+
+                # Leerzeichen nach einer Leerzeile sind wieder Code
+                # (gemessen an Tcl.n, Backslash-Tabelle). man2markdown
+                # (TIP 700) schreibt verschachtelte Listen ebenso flach.
+                set indent ""
+                if {$itemKind eq "op"} {
+                    # .OP: "cmdName|dbName|dbClass"
+                    # -> **-closeenough** (closeEnough/CloseEnough)
+                    set parts [split [_inlinesToText $itemTerm] "|"]
+                    set st [dict get $opts strongStyle]
+                    set termMd "$st[_escapeMd [string map {\\- -} [lindex $parts 0]]]$st"
+                    if {[llength $parts] >= 3} {
+                        # opDbStrong 1 (TIP 700 wie man2markdown):
+                        # (**closeEnough**/**CloseEnough**)
+                        set dst [expr {[_dictDef $opts opDbStrong 0] ? $st : ""}]
+                        append termMd " ($dst[_escapeMd [lindex $parts 1]]$dst/$dst[_escapeMd [lindex $parts 2]]$dst)"
                     }
                 } else {
-                    # Kein Dot-Suffix: jedes Wort wird ein eigenes
-                    # arg-Token (z.B. "arrayName list" → zwei Args).
+                    set termMd [_renderInlines $itemTerm]
+                    # Nur reinen Text fett setzen. Hat der Begriff schon
+                    # Auszeichnung ("A \fBnumeric value\fR", expr.n), gaebe
+                    # ein zweites Paar "**A **numeric value****".
+                    set plain 1
+                    foreach n $itemTerm {
+                        if {[dict get $n type] ne "text"} { set plain 0; break }
+                    }
+                    if {$termMd ne "" && $plain} {
+                        set st [dict get $opts strongStyle]
+                        set termMd "$st$termMd$st"
+                    }
+                }
+                if {$termMd ne ""} {
+                    append out "${indent}${termMd}\n"
+                }
+                if {$descMd ne ""} {
                     set first 1
-                    foreach w [_splitWords $t] {
-                        if {$w eq ""} continue
-                        if {$first && $prefix ne ""} {
-                            set w "${prefix}${w}"
-                            set prefix ""
+                    foreach line [split $descMd "\n"] {
+                        if {$first} {
+                            append out "${indent}: $line\n"
+                            set first 0
+                        } elseif {$line eq ""} {
+                            append out "\n"
+                        } else {
+                            append out "${indent}  $line\n"
                         }
-                        lappend tokens [list arg $w]
-                        set first 0
                     }
+                } elseif {$termMd ne ""} {
+                    append out "${indent}: \n"
                 }
+                append out "\n"
             }
-            text {
-                # Text in Synopsis ist meist Strukturzeichen: "?", "-",
-                # Whitespace. "?" wird ein qmark-Token. "-" und ähnliche
-                # Zeichen (außer Whitespace) werden in prefix gesammelt
-                # und vor das nächste lit/arg-Token gehängt.
-                # Beispiel: ?\fB-code \fIcode\fR? → text "-" hängt
-                # an das folgende strong "code" als "-code".
-                foreach ch [split $itext ""] {
-                    if {$ch eq "?"} {
-                        lappend tokens [list qmark]
-                    } elseif {[string is space $ch]} {
-                        # Whitespace verwerfen
-                    } else {
-                        # alles andere (typisch "-") als Prefix sammeln
-                        append prefix $ch
-                    }
-                }
+            default {
+                # ul + unknown
+                set marker [dict get $opts listMarker]
+                set descMd [_indentContinuationLines $descMd [expr {[string length $marker] + 1}]]
+                append out "${indent}$marker $descMd\n"
             }
         }
     }
-    return $tokens
+    return "$out\n"
 }
 
-# Splittet einen String in Wörter (Whitespace-Trennung).
-proc ast2md::_splitWords {text} {
-    return [regexp -all -inline {\S+} $text]
+proc docir::md::_renderListItem {node} {
+    # Standalone listItem (Schema-Fehler) — als ul rendern
+    variable opts
+    set txt [_renderInlines [dict get $node content]]
+    return "<!-- standalone listItem -->\n[dict get $opts listMarker] $txt\n\n"
 }
 
-# Rendert die Tokens einer ?...?-Gruppe in Spans. spanCount ist die
-# Anzahl Top-Level-Spans vor der Gruppe (unbenutzt, Reserve für
-# Position-Awareness).
+proc docir::md::_renderBlank {node} {
+    set m [_dictDef $node meta {}]
+    set lines [_dictDef $m lines 1]
+    if {$lines < 1} { set lines 1 }
+    return [string repeat "\n" $lines]
+}
+
+proc docir::md::_renderTable {node} {
+    set m [dict get $node meta]
+    set columns   [expr {[dict exists $m columns]   ? [dict get $m columns]   : 0}]
+    set hasHeader [_dictDef $m hasHeader 0]
+    set alignments [_dictDef $m alignments {}]
+
+    if {$columns < 1} {
+        return "<!-- table without columns -->\n\n"
+    }
+
+    # separator line with per-column alignment.
+    # Markdown-Syntax: ` --- ` (default), `:---` (left), `:---:` (center), `---:` (right).
+    set sep "|"
+    for {set i 0} {$i < $columns} {incr i} {
+        set a ""
+        if {$i < [llength $alignments]} {
+            set a [lindex $alignments $i]
+        }
+        switch -- $a {
+            left   { append sep " :--- |" }
+            center { append sep " :---: |" }
+            right  { append sep " ---: |" }
+            default { append sep " --- |" }
+        }
+    }
+
+    # pseudo header if hasHeader=0
+    set pseudo "|"
+    for {set i 0} {$i < $columns} {incr i} {
+        append pseudo "   |"
+    }
+
+    set out ""
+    set rowIndex 0
+    foreach row [dict get $node content] {
+        if {[dict get $row type] ne "tableRow"} {
+            append out "<!-- schema warning: '[dict get $row type]' in table.content -->\n"
+            incr rowIndex
+            continue
+        }
+
+        # before the first row: pseudo header if hasHeader=0
+        if {$rowIndex == 0 && !$hasHeader} {
+            append out "$pseudo\n$sep\n"
+        }
+
+        set rowMd "|"
+        foreach cell [dict get $row content] {
+            if {[dict get $cell type] ne "tableCell"} { continue }
+            set cellMd [_renderInlines [dict get $cell content]]
+            # escape / map pipes and newlines in the cell content
+            set cellMd [string map [list "|" "\\|" "\n" " "] $cellMd]
+            append rowMd " $cellMd |"
+        }
+        append out "$rowMd\n"
+
+        # separator after the first row if it is a real header
+        if {$rowIndex == 0 && $hasHeader} {
+            append out "$sep\n"
+        }
+        incr rowIndex
+    }
+    return "$out\n"
+}
+
+proc docir::md::_renderImageBlock {node} {
+    set m [dict get $node meta]
+    set url [_dictDef $m url ""]
+    set alt [_dictDef $m alt ""]
+    set title [_dictDef $m title ""]
+    set out "!\[$alt\]($url"
+    if {$title ne ""} {
+        append out " \"$title\""
+    }
+    append out ")\n\n"
+    return $out
+}
+
+proc docir::md::_renderFootnoteSection {node} {
+    # Markdown rendert footnote-defs einfach als [^id]: text
+    # (they appear at the end of the doc; mdparser collects them into a section)
+    set out ""
+    foreach def [dict get $node content] {
+        if {[dict get $def type] ne "footnote_def"} continue
+        append out [_renderFootnoteDef $def]
+    }
+    return $out
+}
+
+proc docir::md::_renderFootnoteDef {node} {
+    set m [dict get $node meta]
+    set id [_dictDef $m id ""]
+    # render the content of the definition as inlines
+    set body [_renderInlines [dict get $node content]]
+    return "\[^$id\]: $body\n\n"
+}
+
+proc docir::md::_renderDiv {node} {
+    # TIP-700 div — Pandoc-Notation: ::: {.class #id} ... :::
+    set m [dict get $node meta]
+    set cls [_dictDef $m class ""]
+    set id  [if {[dict exists $m id]} {dict get $m id} else {lindex ""}]
+
+    set attrs ""
+    if {$cls ne ""} { append attrs ".$cls " }
+    if {$id  ne ""} { append attrs "#$id " }
+    set attrs [string trimright $attrs]
+
+    if {$attrs eq ""} {
+        # Ohne Attribute: rein durchreichen ohne Marker
+        set body ""
+        foreach child [dict get $node content] {
+            append body [_renderBlock $child]
+        }
+        return $body
+    }
+
+    set out ":::: \{$attrs\}\n\n"
+    foreach child [dict get $node content] {
+        append out [_renderBlock $child]
+    }
+    append out "::::\n\n"
+    return $out
+}
+
+proc docir::md::_renderUnknown {node reason} {
+    set t [dict get $node type]
+    set inner ""
+    if {[dict exists $node content]} {
+        set c [dict get $node content]
+        if {[catch {_renderInlines $c} txt]} {
+            set inner ""
+        } else {
+            set inner $txt
+        }
+    }
+    if {$inner ne ""} {
+        return "<!-- $reason -->\n$inner\n\n"
+    }
+    return "<!-- $reason -->\n\n"
+}
+
+# ============================================================
+# Inline rendering
+# ============================================================
+
+proc docir::md::_renderInlines {inlines} {
+    set out ""
+    set prevMark 0
+    foreach i $inlines {
+        set md [_renderInline $i]
+        # Fett direkt an kursiv ("\fB$\fIname\fR", Tcl.n) gaebe
+        # "**$***name*"; das paaren Markdown-Parser falsch (mdstack zeigt
+        # "**$**" woertlich). Dann fuer das zweite Stueck "_"/"__".
+        # Nur nach echtem Marker, nicht nach "\*" im Text (mathfunc.n:
+        # "\fIe\fR**\fIarg\fR").
+        if {$prevMark && [string index $out end] eq "*" && [string index $md 0] eq "*"
+                && [dict get $i type] in {strong emphasis}} {
+            variable opts
+            set alt $opts
+            dict set opts strongStyle __
+            dict set opts emphStyle _
+            set md [_renderInline $i]
+            set opts $alt
+        }
+        append out $md
+        set prevMark [expr {[dict get $i type] in {strong emphasis}}]
+    }
+    return $out
+}
+
+# Optional field `style` of a span or link: put the Markdown markers back
+# around it (**[x]{.index}**), innermost first.
+proc docir::md::_wrapStyle {inline md} {
+    variable opts
+    foreach s [_dictDef $inline style {}] {
+        switch -- $s {
+            strong   { set m [dict get $opts strongStyle]; set md "$m$md$m" }
+            emphasis { set m [dict get $opts emphStyle];   set md "$m$md$m" }
+            strike   { set md "~~$md~~" }
+        }
+    }
+    return $md
+}
+
+# Fett/kursiv mit Leerraum an den Raendern: der Leerraum kommt vor bzw.
+# hinter die Marker. "** canvas **" ist in Markdown kein Fett; aus nroff
+# wie "\fBcanvas\fI pathName \fR" entstand "**canvas*** pathName *"
+# (gemessen: n2md, 1050 Stellen in 168 Seiten von Tcl 9.0.5 und Tk 9.0).
+proc docir::md::_mark {m txt} {
+    if {[string trim $txt] eq ""} { return $txt }
+    regexp {^(\s*)(.*?)(\s*)$} $txt -> l mid r
+    return "$l$m$mid$m$r"
+}
+
+proc docir::md::_renderInline {inline} {
+    variable opts
+    set t [dict get $inline type]
+    set txt [_dictDef $inline text ""]
+    set escTxt [_escapeMd $txt]
+
+    switch $t {
+        text       { return $escTxt }
+        strong     { return [_mark [dict get $opts strongStyle] $escTxt] }
+        emphasis   { return [_mark [dict get $opts emphStyle] $escTxt] }
+        underline  { return "<u>$escTxt</u>" }
+        strike     { return "~~${escTxt}~~" }
+        code       {
+            # code inlines: no Markdown escaping; but backticks in the text
+            # require double backticks on the outside
+            if {[string first "`" $txt] >= 0} {
+                return "`` $txt ``"
+            }
+            return "`$txt`"
+        }
+        link       { return [_wrapStyle $inline [_renderLinkInline $inline]] }
+        image {
+            # ![alt](url "title"?)
+            set url [_dictDef $inline url ""]
+            set out "!\[$escTxt\]($url"
+            if {[dict exists $inline title] && [dict get $inline title] ne ""} {
+                set title [dict get $inline title]
+                append out " \"$title\""
+            }
+            append out ")"
+            return $out
+        }
+        linebreak {
+            # Hard break: two spaces + newline. In Markdown, for
+            # easier reading a <br/> tag is also accepted,
+            # but the "real" Markdown form is two trailing spaces.
+            return "  \n"
+        }
+        softbreak {
+            # Soft break: a plain newline keeps the lines separate in the
+            # Markdown source while rendering as a space downstream.
+            return "\n"
+        }
+        span {
+            # TIP-700 span — Markdown hat keine Standard-Notation.
+            # We use the Pandoc extension [text]{.class #id}
+            set cls [_dictDef $inline class ""]
+            set id  [if {[dict exists $inline id]} {dict get $inline id} else {lindex ""}]
+            if {$cls eq "" && $id eq ""} {
+                # Without attributes, span is a no-op — just return the text
+                return $escTxt
+            }
+            set attrs ""
+            if {$cls ne ""} { append attrs ".$cls " }
+            if {$id  ne ""} { append attrs "#$id " }
+            return [_wrapStyle $inline "\[$escTxt\]\{[string trimright $attrs]\}"]
+        }
+        footnote_ref {
+            # [^id] in Markdown
+            set id [_dictDef $inline id ""]
+            return "\[^$id\]"
+        }
+        math {
+            # Pandoc-style math: $...$ (inline) or $$...$$ (display)
+            set disp [_dictDef $inline display 0]
+            if {$disp} {
+                return "\$\$${txt}\$\$"
+            }
+            return "\$${txt}\$"
+        }
+        default {
+            # unknown inline type — preserve the text with an HTML comment marker
+            return "<!--$t-->$escTxt"
+        }
+    }
+}
+
+proc docir::md::_renderLinkInline {inline} {
+    variable opts
+    set txt [_dictDef $inline text ""]
+    set escTxt [_escapeMd $txt]
+
+    set href ""
+    # take only a NON-EMPTY href field — DocIR nodes have
+    # manchmal href="" plus name/section (vom roff-Mapper)
+    if {[dict exists $inline href] && [dict get $inline href] ne ""} {
+        set href [dict get $inline href]
+    } elseif {[dict exists $inline name]} {
+        set name    [dict get $inline name]
+        set section [_dictDef $inline section ""]
+        set lr [dict get $opts linkResolve]
+        if {$lr ne ""} {
+            if {[catch {{*}$lr $name $section} resolved]} {
+                set href ""
+            } else {
+                set href $resolved
+            }
+        } else {
+            # Default: name(section).md
+            if {$section ne ""} {
+                set href "${name}.${section}.md"
+            } else {
+                set href "${name}.md"
+            }
+        }
+    }
+    if {$href eq ""} {
+        return $escTxt
+    }
+    return "\[$escTxt\]($href)"
+}
+
+# ============================================================
+# Helpers
+# ============================================================
+
+proc docir::md::_inlinesToText {inlines} {
+    set out ""
+    foreach i $inlines {
+        if {[dict exists $i text]} { append out [dict get $i text] }
+    }
+    return $out
+}
+
+# Markdown escaping for text inlines.
+# We escape the most painful special characters. Not all, because that
+# makes the output ugly — Markdown parsers are tolerant of
+# non-escaped characters when the context is clear.
+proc docir::md::_escapeMd {s} {
+    set s [string map {
+        "\\" "\\\\"
+        "*"  "\\*"
+        "`"  "\\`"
+        "\[" "\\\["
+        "\]" "\\\]"
+    } $s]
+    # "_" nur, wo es Kursiv oeffnen/schliessen koennte -- nicht zwischen
+    # zwei Wortzeichen ("Tk_GetPixels"; CommonMark und mdstack lassen
+    # snake_case stehen, man2markdown schreibt es ebenso ohne "\").
+    if {[string first _ $s] >= 0} {
+        set out ""
+        set n [string length $s]
+        for {set k 0} {$k < $n} {incr k} {
+            set c [string index $s $k]
+            if {$c eq "_"
+                    && !([string is wordchar [string index $s [expr {$k - 1}]]] && $k > 0
+                         && [string is wordchar [string index $s [expr {$k + 1}]]] && $k < $n - 1)} {
+                append out "\\_"
+            } else {
+                append out $c
+            }
+        }
+        set s $out
+    }
+    # "$" kann Inline-Mathe oeffnen oder schliessen ($...$, pandoc,
+    # mdstack): "**sin($x)** or **atan2($y,$x)**" (mathfunc.n) und
+    # "a **$**, as in **%2$d**" (format.n) wurden in mdstack zu Mathe
+    # zwischen zwei "$". Ein Textknoten sieht seinen Nachbarn nicht,
+    # also jedes "$".
+    set s [string map {$ \\$} $s]
+    # "<newline>", "<Button-1>" (Tcl.n, bind.n) sehen wie HTML aus;
+    # Markdown-Parser verschlucken sie sonst als Tag.
+    regsub -all {<(?=[A-Za-z/!?])} $s {\\<} s
+    return $s
+}
+
+# Appends continuation lines (newlines in the text) at a constant
+# indentation — useful for lists with multi-line content.
+proc docir::md::_indentContinuationLines {text indent} {
+    set lines [split $text "\n"]
+    if {[llength $lines] <= 1} { return $text }
+    set spaces [string repeat " " $indent]
+    set out [lindex $lines 0]
+    foreach line [lrange $lines 1 end] {
+        append out "\n${spaces}${line}"
+    }
+    return $out
+}
+
+# ===========================================================================
+# EMBEDDED: n2md/tip700-0.1.tm
+# ===========================================================================
+
+# n2md::tip700 -- Markdown nach TIP 700 aus einer nroff-Handbuchseite
 #
-# Verhalten:
-#   - Einzel-Token-Gruppe: Token wird zu seinem opt-Pendant
-#       lit → [w]{.optlit}
-#       arg → [w]{.optarg}
-#       dot → [stem]{.optdot}        (Spec: ohne "...", CSS hängt sie an)
-#   - Mehr-Token-Gruppe: alle Tokens werden als innere Spans formatiert
-#     (mit ihren primären Klassen lit/arg/optdot) und in
-#     [...]{.optarg} eingewickelt — entspricht der Spec-Form
-#     [[-code]{.lit} [code]{.arg}]{.optarg} für Tcl-return.
-proc ast2md::_renderGroupSpans {groupTokens spanCount} {
-    if {[llength $groupTokens] == 0} { return [list] }
+#   package require n2md::tip700
+#   set md [n2md::tip700::render $nroffText $ir]
+#
+# $ir ist das DocIR von docir::roff::fromAst. Ausgabe im Format, das
+# man2markdown.tcl (TIP 700) schreibt und das tcltk-manual-de fuer
+# en-markdown/de-markdown verwendet:
+#
+#   ---                                YAML-Kopf
+#   CommandName: after                 .TH Name
+#   ManualSection: n                   .TH Abschnitt
+#   Version: 7.5                       .TH Version
+#   TclPart: Tcl                       .TH Teil
+#   TclDescription: Tcl Built-In ...   .TH Beschreibung
+#   Links:                             Abschnitt SEE ALSO
+#    - concat(n)
+#   Keywords:                          Abschnitt KEYWORDS
+#    - cancel
+#   Copyright:                         Kommentarzeilen '\" Copyright ...
+#    - Copyright (c) 1990-1994 ...
+#   ---
+#
+#   # Name                             .SH: erster Buchstabe gross, Rest klein
+#   ## Subsection                      .SS
+#
+#   ::: {.synopsis} :::                Uebersicht als Spans
+#   [after]{.cmd} [ms]{.arg} [script ...]{.optdot}
+#   :::
+#
+# SEE ALSO und KEYWORDS stehen nur im Kopf, nicht im Text. Der Rest kommt
+# unveraendert aus docir::md (Definitionslisten ": ", Codebloecke ```).
+#
+# Spans der Uebersicht (wie man2markdown):
+#   .cmd     erstes fettes Wort                      \fBafter\fR
+#   .sub     zweites fettes Wort direkt danach       \fBafter cancel\fR
+#   .lit     weitere fette Woerter                   \fBpackage require http\fR
+#   .ins     kursives erstes Wort (Widget-Befehl)    \fIpathName\fR \fBcget\fR
+#   .arg     kursives Wort                           \fIms\fR
+#   .optarg  ?kursiv?                                ?\fIid\fR?
+#   .optlit  ?fett?                                  ?\fB-nocase\fR?
+#   .optdot  ?... mit "..." am Ende, ohne "..."      ?\fIscript script ...\fR?
+#            und ?mehrere Woerter?                   ?\fIoption value\fR?
+#            (man2markdown: .optdot nur mit "...", sonst .optarg)
 
-    if {[llength $groupTokens] == 1} {
-        set tok [lindex $groupTokens 0]
-        set tt  [lindex $tok 0]
-        set txt [lindex $tok 1]
-        switch -- $tt {
-            lit { return [list "\[$txt\]\{.optlit\}"] }
-            arg { return [list "\[$txt\]\{.optarg\}"] }
-            dot {
-                if {$txt eq "..."} {
-                    return [list "\[...\]\{.optdot\}"]
-                }
-                return [list "\[$txt\]\{.optdot\}"]
-            }
-        }
-        return [list]
-    }
+package require Tcl 8.6-
+package require docir::md
 
-    # Mehr-Token-Gruppe: verschachtelt in [...]{.optarg}
-    set inner [list]
-    foreach tok $groupTokens {
-        set tt  [lindex $tok 0]
-        set txt [lindex $tok 1]
-        switch -- $tt {
-            lit { lappend inner "\[$txt\]\{.lit\}" }
-            arg { lappend inner "\[$txt\]\{.arg\}" }
-            dot {
-                if {$txt eq "..."} {
-                    lappend inner "\[...\]\{.optdot\}"
-                } else {
-                    lappend inner "\[$txt\]\{.optdot\}"
-                }
-            }
-        }
+namespace eval n2md::tip700 {}
+
+# ------------------------------------------------------------
+# YAML-Kopf
+# ------------------------------------------------------------
+
+# Argumente einer Makrozeile: "..." oder Wort
+proc n2md::tip700::_args {rest} {
+    set out {}
+    foreach {- q w} [regexp -all -inline {"([^"]*)"|(\S+)} $rest] {
+        # nicht [expr {... ? $q : $w}]: expr macht aus "2.10" die Zahl 2.1
+        # (gemessen: http.n, .TH ... 2.10)
+        if {$w ne ""} { lappend out $w } else { lappend out $q }
     }
-    return [list "\[[join $inner { }]\]\{.optarg\}"]
+    return $out
 }
+
+# nroff-Escapes in Kopfwerten (Copyright-Zeilen, .TH)
+proc n2md::tip700::_plain {s} {
+    set s [string map {
+        {\(co} "(c)" {\(em} "—" {\(en} "–" {\-} - {\e} \\
+        {\fB} "" {\fI} "" {\fR} "" {\fP} "" {\&} "" {\%} ""
+    } $s]
+    return [string trim $s]
+}
+
+# YAML-Wert: wie man2markdown ohne Anfuehrung, ausser er wuerde sonst
+# falsch gelesen (": " im Wert, fuehrendes Sonderzeichen).
+proc n2md::tip700::_yval {s} {
+    if {[regexp {: |^[-?:,\[\]{}#&*!|>'"%@`]| #|:$} $s]} {
+        return "\"[string map {\\ \\\\ \" \\\"} $s]\""
+    }
+    return $s
+}
+
+proc n2md::tip700::_head {nroffText ir} {
+    set th {}
+    set copy {}
+    foreach z [split $nroffText \n] {
+        if {$th eq "" && [regexp {^\.TH\s+(.*)$} $z -> rest]} {
+            set th [_args $rest]
+        }
+        # Kommentar: '\" oder .\"
+        if {[regexp {^(?:'|\.)\\"\s*(.*)$} $z -> c]
+                && [regexp -nocase {^copyright\M} [string trim $c]]} {
+            lappend copy [regsub -all {\s+} [_plain $c] " "]
+        }
+    }
+    lassign $th name sect ver part desc
+    set out "---\n"
+    append out "CommandName: [_yval [_plain $name]]\n"
+    append out "ManualSection: [_yval [_plain $sect]]\n"
+    # ohne Version in .TH schreibt man2markdown "unknown"
+    if {[_plain $ver] eq ""} { set ver unknown }
+    append out "Version: [_yval [_plain $ver]]\n"
+    append out "TclPart: [_yval [_plain $part]]\n"
+    append out "TclDescription: [_yval [_plain $desc]]\n"
+    foreach {key titel} {Links {SEE ALSO} Keywords KEYWORDS} {
+        set werte [_sectionWords $ir $titel]
+        if {[llength $werte]} {
+            append out "$key:\n"
+            foreach w $werte { append out " - [_yval $w]\n" }
+        }
+    }
+    append out "Copyright:\n"
+    foreach c $copy { append out " - [_yval $c]\n" }
+    append out "---\n\n"
+    return $out
+}
+
+# Text eines Abschnitts (.SH TITEL), an Kommas getrennt
+proc n2md::tip700::_sectionWords {ir titel} {
+    set in 0
+    set txt ""
+    foreach node $ir {
+        set t [dict get $node type]
+        if {$t eq "heading" && [_level $node] == 1} {
+            set in [expr {[string toupper [_text $node]] eq $titel}]
+            continue
+        }
+        if {!$in} continue
+        if {$t in {paragraph pre}} {
+            append txt " " [_text $node]
+        } elseif {$t eq "list"} {
+            foreach it [dict get $node content] {
+                append txt ", " [docir::md::_inlinesToText [_d [dict get $it meta] term {}]]
+                append txt " " [docir::md::_inlinesToText [dict get $it content]]
+            }
+        }
+    }
+    set out {}
+    foreach w [split $txt ,] {
+        set w [string trim [regsub -all {\s+} $w " "] " ."]
+        # "lsort(n) string(n)" ohne Komma (lappend.n)
+        if {[regexp {^\S+\(\w+\)( \S+\(\w+\))+$} $w]} {
+            set teile [split $w " "]
+        } else {
+            set teile [list $w]
+        }
+        foreach w $teile {
+            if {$w ne "" && $w ni $out} { lappend out $w }
+        }
+    }
+    return $out
+}
+
+proc n2md::tip700::_d {d k {def ""}} {
+    # kein expr: das machte aus dem Text "2.10" die Zahl 2.1
+    if {[dict exists $d $k]} { return [dict get $d $k] }
+    return $def
+}
+proc n2md::tip700::_level {node} {
+    _d [_d $node meta {}] level 1
+}
+proc n2md::tip700::_text {node} {
+    set c [dict get $node content]
+    if {[llength $c] && [string is list [lindex $c 0]] && [dict exists [lindex $c 0] type]} {
+        return [string trim [docir::md::_inlinesToText $c]]
+    }
+    return [string trim $c]
+}
+
+# ------------------------------------------------------------
+# Uebersicht
+# ------------------------------------------------------------
+
+# Inlines -> Zeilen, jede Zeile eine Liste {stil text}
+proc n2md::tip700::_lines {inlines} {
+    set lines {}
+    set cur {}
+    foreach i $inlines {
+        set t [dict get $i type]
+        switch -- $t {
+            strong - emphasis - text - link - span - code {
+                set st [expr {$t in {strong emphasis} ? $t : "text"}]
+                if {$t eq "link"} {
+                    set txt [docir::md::_inlinesToText [list $i]]
+                } else {
+                    set txt [_d $i text ""]
+                }
+                set teile [split $txt \n]
+                set k 0
+                foreach teil $teile {
+                    if {$k > 0} { lappend lines $cur; set cur {} }
+                    if {$teil ne ""} { lappend cur [list $st $teil] }
+                    incr k
+                }
+            }
+            softbreak - linebreak {
+                lappend lines $cur; set cur {}
+            }
+            default {
+                lappend cur [list text [docir::md::_inlinesToText [list $i]]]
+            }
+        }
+    }
+    lappend lines $cur
+    return $lines
+}
+
+# Zeile -> Woerter {text stil}; stil = Stil des ersten Zeichens, das kein
+# "?" ist (aus "?\fIid\fR?" wird {?id? emphasis})
+proc n2md::tip700::_words {segs} {
+    set words {}
+    set w ""; set st ""
+    foreach seg $segs {
+        lassign $seg sstil stxt
+        foreach ch [split $stxt ""] {
+            if {[string is space $ch] || $ch eq "\{" || $ch eq "\}"} {
+                if {$w ne ""} { lappend words [list $w [expr {$st eq "" ? "text" : $st}]] }
+                set w ""; set st ""
+                # Klammern sind eigene Woerter ohne Stil: switch.n
+                # "{\fIpattern body \fR?\fIpattern body ...\fR?}", link.n
+                if {$ch eq "\{" || $ch eq "\}"} { lappend words [list $ch text] }
+                continue
+            }
+            # "?\fB+\fR??\fIscript\fR?" (bind.n): zwei Gruppen ohne
+            # Leerzeichen dazwischen
+            if {$ch eq "?" && [string length $w] > 1 && [string index $w end] eq "?"} {
+                lappend words [list $w [expr {$st eq "" ? "text" : $st}]]
+                set w ""; set st ""
+            }
+            append w $ch
+            if {$st eq "" && $ch ne "?"} { set st $sstil }
+        }
+    }
+    if {$w ne ""} { lappend words [list $w [expr {$st eq "" ? "text" : $st}]] }
+    return $words
+}
+
+proc n2md::tip700::_span {txt cls} {
+    return "\[[docir::md::_escapeMd $txt]\]\{.$cls\}"
+}
+
+# Ist die Zeile eine Befehlszeile? Erstes Wort fett, oder kursiv und
+# danach fett (Widget-Befehl).
+proc n2md::tip700::_isCmdLine {words} {
+    if {![llength $words]} { return 0 }
+    lassign [lindex $words 0] w st
+    if {$st eq "strong" && [string index $w 0] ne "?"} { return 1 }
+    if {$st eq "emphasis" && [llength $words] > 1
+            && [lindex $words 1 1] eq "strong"} { return 1 }
+    return 0
+}
+
+proc n2md::tip700::_synLine {words} {
+    set out {}
+    set n [llength $words]
+    set i 0
+    # Kopf: .cmd/.sub/.lit oder .ins/.sub
+    lassign [lindex $words 0] w st
+    if {$st eq "strong"} {
+        lappend out [_span $w cmd]
+        incr i
+        set k 0
+        while {$i < $n} {
+            lassign [lindex $words $i] w st
+            if {$st ne "strong" || [string index $w 0] eq "?"} break
+            lappend out [_span $w [expr {$k == 0 ? "sub" : "lit"}]]
+            incr k; incr i
+        }
+    } else {
+        lappend out [_span $w ins]
+        incr i
+        lassign [lindex $words $i] w st
+        lappend out [_span $w sub]
+        incr i
+    }
+    # Rest
+    while {$i < $n} {
+        lassign [lindex $words $i] w st
+        if {[string index $w 0] eq "?"} {
+            # Gruppe ?...? sammeln
+            set grp {}
+            set stils {}
+            set w [string range $w 1 end]
+            while 1 {
+                set ende [expr {[string index $w end] eq "?" && $w ne "?"
+                                || ($w eq "?" && [llength $grp])}]
+                set w2 [string trimright $w ?]
+                if {$w2 ne ""} { lappend grp $w2; lappend stils $st }
+                incr i
+                if {$ende || $i >= $n} break
+                lassign [lindex $words $i] w st
+            }
+            if {![llength $grp]} continue
+            if {$grp eq "..."} {
+                # "?...?" (link.n): weitere Argumente derselben Art
+                lappend out [_span ... optdot]
+                continue
+            }
+            set dots 0
+            if {[lindex $grp end] eq "..."} {
+                set dots 1
+                set grp [lrange $grp 0 end-1]
+            } elseif {[string match *... [lindex $grp end]]} {
+                set dots 1
+                lset grp end [string range [lindex $grp end] 0 end-3]
+            }
+            if {$dots || [llength $grp] > 1} {
+                set cls [expr {$dots ? "optdot" : "optarg"}]
+            } elseif {[lindex $stils 0] eq "strong"} {
+                set cls optlit
+            } else {
+                set cls optarg
+            }
+            if {[llength $grp]} { lappend out [_span [join $grp " "] $cls] }
+            continue
+        }
+        switch -- $st {
+            emphasis { lappend out [_span $w arg] }
+            strong   { lappend out [_span $w lit] }
+            default  { lappend out [docir::md::_escapeMd $w] }
+        }
+        incr i
+    }
+    return "[join $out " "] "
+}
+
+# Bloecke des SYNOPSIS-Abschnitts -> Liste von IR-Knoten
+proc n2md::tip700::_synopsis {nodes} {
+    set out {}
+    set syn {}
+    set prosa {}
+    foreach node $nodes {
+        set t [dict get $node type]
+        if {$t ni {paragraph pre}} {
+            lappend prosa $node
+            continue
+        }
+        set zeilen {}
+        set befehl 0
+        foreach segs [_lines [dict get $node content]] {
+            set words [_words $segs]
+            if {![llength $words]} {
+                lappend zeilen ""
+                continue
+            }
+            if {[_isCmdLine $words]} {
+                lappend zeilen [_synLine $words]
+                set befehl 1
+            } elseif {![regexp {[[:alnum:]]} [join [lmap w $words {lindex $w 0}] ""]]} {
+                # nur Klammern o.ae. (schliessende Klammer fett, configurable.n): ohne Fett
+                lappend zeilen [docir::md::_escapeMd [join [lmap w $words {lindex $w 0}] " "]]
+            } else {
+                lappend zeilen [string trim [docir::md::renderInline \
+                    [lmap s $segs {dict create type [lindex $s 0] text [lindex $s 1]}]]]
+            }
+        }
+        if {$befehl} {
+            # Leerzeilen am Rand weg, innen hoechstens eine
+            set z [string trim [join $zeilen \n] \n]
+            regsub -all {\n{3,}} $z "\n\n" z
+            # Bloecke ohne Leerzeile aneinander (.br trennt in binary.n
+            # Absaetze); Leerzeilen kommen aus dem Block selbst
+            lappend syn $z
+        } else {
+            lappend prosa $node
+        }
+    }
+    if {[llength $syn]} {
+        set raw "::: {.synopsis} :::\n[join $syn \n]\n:::"
+        lappend out [dict create type pre content [list [dict create type text text $raw]] \
+            meta [dict create kind html]]
+    }
+    lappend out {*}$prosa
+    return $out
+}
+
+# ------------------------------------------------------------
+# Hauptprozedur
+# ------------------------------------------------------------
+
+# "WIDGET-SPECIFIC OPTIONS" -> "Widget-specific options"; Woerter mit
+# Kleinbuchstaben bleiben ("DIFFERENT FLAVORS OF REs" -> "... of REs")
+proc n2md::tip700::_title {s} {
+    set out {}
+    foreach w [split $s " "] {
+        if {![regexp {[[:lower:]]} $w]} { set w [string tolower $w] }
+        lappend out $w
+    }
+    set s [join $out " "]
+    return "[string toupper [string index $s 0]][string range $s 1 end]"
+}
+
+# Zwei Begriffe mit einer Beschreibung (.TP a / .TP b Text): der erste
+# bekommt wie bei man2markdown ": ...see next..."
+proc n2md::tip700::_seeNext {node} {
+    set items [dict get $node content]
+    set n [llength $items]
+    for {set k 0} {$k < $n - 1} {incr k} {
+        set it [lindex $items $k]
+        if {[string trim [docir::md::_inlinesToText [dict get $it content]]] eq ""} {
+            dict set it content [list [dict create type text text "...see next..."]]
+            lset items $k $it
+        }
+    }
+    dict set node content $items
+    return $node
+}
+
+# Absaetze mit meta.version (.VS/.VE) -> ::: {.info -version="..."}
+proc n2md::tip700::_info {nodes} {
+    set out {}
+    set grp {}
+    set ver ""
+    foreach node [concat $nodes [list {}]] {
+        set v ""
+        set hat [expr {$node ne "" && [dict get $node type] eq "paragraph"
+                       && [dict exists [dict get $node meta] version]}]
+        if {$hat} { set v [dict get [dict get $node meta] version] }
+        if {[llength $grp] && (!$hat || $v ne $ver)} {
+            set md [string trimright [docir::md::render $grp {headingShift 0}]]
+            set raw "::: \{.info -version=\"[string map {\" '} $ver]\"\}\n$md\n:::"
+            lappend out [dict create type pre content [list [dict create type text text $raw]] \
+                meta [dict create kind html]]
+            set grp {}
+        }
+        if {$node eq ""} break
+        if {$hat} {
+            lappend grp $node
+            set ver $v
+        } else {
+            lappend out $node
+        }
+    }
+    return $out
+}
+
+proc n2md::tip700::transform {ir} {
+    set out {}
+    set abschnitt ""
+    set synNodes {}
+    foreach node $ir {
+        set t [dict get $node type]
+        if {$t in {doc_meta doc_header}} continue
+        if {$t eq "heading"} {
+            set lv [_level $node]
+            set titel [_text $node]
+            if {$lv == 1} {
+                if {$abschnitt eq "SYNOPSIS"} {
+                    lappend out {*}[_synopsis $synNodes]
+                    set synNodes {}
+                }
+                set abschnitt [string toupper $titel]
+                if {$abschnitt in {"SEE ALSO" KEYWORDS}} continue
+            } elseif {$abschnitt in {"SEE ALSO" KEYWORDS}} {
+                continue
+            }
+            dict set node content [list [dict create type text text [_title $titel]]]
+            lappend out $node
+            continue
+        }
+        if {$abschnitt in {"SEE ALSO" KEYWORDS}} continue
+        if {$abschnitt eq "SYNOPSIS"} {
+            lappend synNodes $node
+            continue
+        }
+        if {$t eq "list"} { set node [_seeNext $node] }
+        lappend out $node
+    }
+    if {$abschnitt eq "SYNOPSIS"} {
+        lappend out {*}[_synopsis $synNodes]
+    }
+    return [_info $out]
+}
+
+proc n2md::tip700::render {nroffText ir} {
+    set body [docir::md::render [transform $ir] {headingShift 0 opDbStrong 1}]
+    return "[_head $nroffText $ir]$body"
+}
+
+package provide n2md::tip700 0.1
 
 # MAIN -- Argument-Verarbeitung und Konvertierung
 # ===========================================================================
@@ -4188,9 +5737,11 @@ proc usage {} {
     puts "Usage: nroff2md.tcl \[input.n\] \[output.md\] \[options\]"
     puts ""
     puts "Options:"
-    puts "  -lang LANG           Code block language (default: tcl)"
-    puts "  --linkmode MODE      Link mode: none, server, file"
-    puts "  --tip700             Emit TIP-700 bracketed_spans in SYNOPSIS"
+    puts "  --tip700             TIP-700 format as man2markdown.tcl: YAML head,"
+    puts "                       ::: {.synopsis} ::: with spans, SEE ALSO and"
+    puts "                       KEYWORDS in the head"
+    puts "  --linkmode MODE      Link mode: none, server, file (not with --tip700)"
+    puts "  -lang LANG           accepted, ignored (code blocks have no language)"
     puts "  --batch DIR OUT      Convert all .n/.3 files in DIR to OUT/"
     puts "  --no-index           Skip index.md generation in batch mode"
     puts "  --help               Show this help"
@@ -4201,8 +5752,18 @@ proc usage {} {
     puts "  file     SEE ALSO as pagename.md (relative file links)"
 }
 
+# SEE ALSO links: none -> plain text, server -> /name, file -> name.md
+proc linkTarget {mode name section} {
+    switch -- $mode {
+        server  { return "/$name" }
+        file    { return "$name.md" }
+        default { return "" }
+    }
+}
+
 proc convertFile {inputFile outputFile lang linkmode {indexLink ""} {tip700 false}} {
     if {$inputFile eq "-"} {
+        fconfigure stdin -encoding utf-8
         set nroff [read stdin]
         set sourceFile ""
     } else {
@@ -4219,25 +5780,28 @@ proc convertFile {inputFile outputFile lang linkmode {indexLink ""} {tip700 fals
 
     if {[catch {
         set ast [nroffparser::parse $nroff $sourceFile]
-        set md  [ast2md::render $ast -lang $lang -linkmode $linkmode -tip700 $tip700]
+        set ir  [docir::roff::fromAst $ast]
+        if {$tip700} {
+            set md [n2md::tip700::render $nroff $ir]
+        } else {
+            set md [docir::md::render $ir [list linkResolve [list linkTarget $linkmode]]]
+        }
     } err]} {
         puts stderr "Error converting $inputFile: $err"
         return {0 {}}
     }
 
-    # Metadaten aus dem TH-Node (level=0 heading)
+    # Metadaten (name, section) aus doc_header fuer index.md
     set meta {}
-    foreach node $ast {
-        if {[dict get $node type] eq "heading"} {
-            set m [dict get $node meta]
-            if {[dict exists $m level] && [dict get $m level] == 0} {
-                set meta $m
-                break
-            }
+    foreach node $ir {
+        if {[dict get $node type] eq "doc_header"} {
+            set meta [dict get $node meta]
+            break
         }
     }
 
     if {$outputFile eq ""} {
+        fconfigure stdout -encoding utf-8
         puts -nonewline $md
     } else {
         file mkdir [file dirname $outputFile]
@@ -4359,7 +5923,7 @@ proc batchConvert {inputDir outputDir lang linkmode noIndex {tip700 false}} {
     set files [findNroffFiles $inputDir]
     if {[llength $files] == 0} {
         puts stderr "No .n or .3 files found in $inputDir (recursive)"
-        return
+        return 0
     }
     file mkdir $outputDir
 
@@ -4393,6 +5957,7 @@ proc batchConvert {inputDir outputDir lang linkmode noIndex {tip700 false}} {
     if {!$noIndex && [llength $indexEntries] > 0} {
         generateIndex $indexEntries $outputDir $linkmode
     }
+    return [expr {$fail == 0}]
 }
 
 # Argument-Verarbeitung
@@ -4429,9 +5994,10 @@ while {$i < [llength $argv]} {
 }
 
 if {$batch} {
-    batchConvert $batchIn $batchOut $lang $linkmode $noIndex $tip700
+    set ok [batchConvert $batchIn $batchOut $lang $linkmode $noIndex $tip700]
 } elseif {$inputFile ne ""} {
-    convertFile $inputFile $outputFile $lang $linkmode "" $tip700
+    set ok [lindex [convertFile $inputFile $outputFile $lang $linkmode "" $tip700] 0]
 } else {
-    convertFile "-" "" $lang $linkmode "" $tip700
+    set ok [lindex [convertFile "-" "" $lang $linkmode "" $tip700] 0]
 }
+exit [expr {$ok ? 0 : 1}]
