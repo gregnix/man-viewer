@@ -1,5 +1,24 @@
 # man-viewer — Changelog
 
+## 2026-10-24 — test runner, blank test, n2md finds docir
+
+From the bookkit review of 2026-10-24 (T01, T02).
+
+- `tests/run-all-tests.tcl`: a test file that exits with an error (failed
+  tests or a crash) no longer ends the whole run. Its output is still
+  counted; a file without a summary counts as one failure; the runner
+  uses the running interpreter (`info nameofexecutable`), not `tclsh`
+  from the PATH.
+- `test-blank-consumers.tcl`: `blank.consumer.docir_roff` expected at
+  least three blank nodes, but docir's roffSource drops a blank after a
+  block that keeps its own spacing (since 2026-06-20). The test now
+  expects none there; the new test `docir_roff_kept_at_start` checks that
+  a blank without such a block stays, with `content {}` and `lines`.
+- `bin/n2md`: looks for docir in `DOCIR_HOME`, as a sibling (`../docir`)
+  and in `~/lib/tcltk/docir`, as the comment always said. Before, it found
+  docir only when installed; `test-n2md.tcl` failed three times
+  elsewhere.
+
 ## 2026-10-22 — n2md: tcllib/tklib (doctools-nroff)
 
 Measured on tcllib and tklib (idoc/man, 447 + 86 pages): all converted,

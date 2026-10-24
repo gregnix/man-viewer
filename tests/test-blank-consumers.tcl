@@ -144,12 +144,31 @@ test "blank.consumer.docir_roff" {
     if {[catch {set ir [docir::roff::fromAst $ast]} err]} {
         error "docir::roff::fromAst scheiterte: $err"
     }
-    # Erwartung: blank-Nodes wurden zu DocIR-blank-Nodes (mit content {})
+    # Erwartung seit docir 2026-06-20 (roffSource): ein blank nach einem
+    # Block, der selbst Abstand haelt (Ueberschrift, Absatz, Liste, pre,
+    # Tabelle, doc_header), faellt weg -- sonst dreifacher Abstand. Im
+    # synthetischen AST steht jeder blank hinter so einem Block, also
+    # bleibt keiner. (Bis 2026-10-24 erwartete der Test noch >= 3; Review
+    # T02: Testerwartung, kein Layoutfehler.)
     set blankCount 0
     foreach n $ir {
         if {[dict get $n type] eq "blank"} { incr blankCount }
     }
-    assert [expr {$blankCount >= 3}] "DocIR enthält mindestens 3 blank-Nodes (got $blankCount)"
+    assertEqual 0 $blankCount "blank nach selbsttrennenden Bloecken entfaellt"
+}
+
+test "blank.consumer.docir_roff_kept_at_start" {
+    # Ohne Block davor bleibt der blank, mit content {} und lines
+    set ast [list \
+        [dict create type blank meta {lines 2}] \
+        [dict create type paragraph content [list [dict create type text text "x"]] meta {}]]
+    set ir [docir::roff::fromAst $ast]
+    # doc_meta steht vorn; der erste Inhaltsknoten ist der blank
+    set ir [lsearch -all -inline -not -index 1 $ir doc_meta]
+    set b [lindex $ir 0]
+    assertEqual blank [dict get $b type] "erster Inhaltsknoten bleibt blank"
+    assertEqual {} [dict get $b content] "blank mit leerem content"
+    assertEqual 2 [dict get $b meta lines] "lines bleibt erhalten"
 }
 
 test "blank.consumer.docir_roff_validates" {

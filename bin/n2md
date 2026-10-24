@@ -18,9 +18,19 @@ set libDir [file join $projectRoot lib tm]
 
 # auto_path fuer pkgIndex-registrierte Module
 
-# DocIR liegt jetzt in einem separaten Repository (siehe ../docir/).
-# Loader sucht das Repo (DOCIR_HOME / Siblings / vendors) und sourct
-# die Module direkt — robust gegen Pfad-Konflikte.# Eigene Module aus lib/tm/
+# DocIR liegt in einem separaten Repository (siehe ../docir/). Gesucht wird
+# es in DOCIR_HOME, als Nachbarordner und in ~/lib/tcltk/docir; erst danach
+# gilt der normale Modulpfad (installiertes docir). Bis 2026-10-24 stand
+# das nur im Kommentar, n2md fand docir nur, wenn es installiert war.
+set docirCands {}
+if {[info exists ::env(DOCIR_HOME)]} { lappend docirCands [file join $::env(DOCIR_HOME) lib tm] }
+lappend docirCands [file join $projectRoot .. docir lib tm] \
+    [file join ~ lib tcltk docir lib tm]
+foreach c $docirCands {
+    set c [file normalize $c]
+    if {[file exists [file join $c docir-0.1.1.tm]]} { ::tcl::tm::path add $c; break }
+}
+# Eigene Module aus lib/tm/
 ::tcl::tm::path add [file join $projectRoot lib tm]
 # Module laden
 package require docir

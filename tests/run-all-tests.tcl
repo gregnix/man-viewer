@@ -40,12 +40,19 @@ foreach testFile $testFiles {
     }
 
     puts "Running $testFile..."
-    set output [exec tclsh $testPath 2>@1]
+    # Ein Kindprozess mit Exit-Code != 0 (fehlgeschlagene Tests oder ein
+    # Abbruch) beendet den Sammellauf nicht mehr (Review 2026-10-24, T01):
+    # die Ausgabe wird trotzdem ausgewertet, die naechste Datei laeuft.
+    set rc [catch {exec [info nameofexecutable] $testPath 2>@1} output]
+    if {$rc} { regsub {\nchild process exited abnormally$} $output "" output }
 
     # Passed/Failed aus Ausgabe extrahieren
     set p 0; set f 0
-    regexp {Passed:\s+(\d+)} $output -> p
+    set hatP [regexp {Passed:\s+(\d+)} $output -> p]
     regexp {Failed:\s+(\d+)} $output -> f
+    # Abbruch ohne Zusammenfassung zaehlt als ein Fehler der Datei
+    if {$rc && $f == 0} { set f 1 }
+    if {!$hatP && !$rc} { set f [expr {max($f, 1)}]; append output "\n(keine Zusammenfassung gefunden)" }
     incr totalPassed $p
     incr totalFailed $f
 
