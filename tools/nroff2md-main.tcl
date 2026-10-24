@@ -54,6 +54,7 @@ proc convertFile {inputFile outputFile lang linkmode {indexLink ""} {tip700 fals
         } else {
             set md [docir::md::render $ir [list linkResolve [list linkTarget $linkmode]]]
         }
+        set md [n2md::tip700::uriLinks $md]
     } err]} {
         puts stderr "Error converting $inputFile: $err"
         return {0 {}}

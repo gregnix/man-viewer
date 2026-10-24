@@ -1,5 +1,31 @@
 # man-viewer — Changelog
 
+## 2026-10-22 — n2md: tcllib/tklib (doctools-nroff)
+
+Measured on tcllib and tklib (idoc/man, 447 + 86 pages): all converted,
+no macro leftovers, every page with a synopsis in the source has the
+`::: {.synopsis} :::` block.
+
+- nroffparser: `.PS` ... `.PE` (pic picture) becomes a code block like
+  `.nf`; the `\&.nf` / `\&.fi` lines inside are dropped. Before,
+  ".PS .nf +- Digit 0 0 | 1 ..." ran into the text (pt_astree.n and four more).
+- `--tip700`: doctools writes `package require \fBbase64 ?2.6.1?\fR` with
+  the first two words in roman; such lines are now synopsis lines
+  (`[package]{.cmd} [require]{.sub} [base64]{.lit} [2.6.1]{.optlit}`).
+  Before they stood as text after the block.
+- `n2md::tip700::uriLinks` (n2md and nroff2md, both modes): doctools
+  references "\fIRFC 4648\fR [https://...]" become `[RFC 4648](https://...)`,
+  a bare `[https://...]` becomes `<https://...>` (681 places in tcllib).
+- `tools/nroff2md.tcl` rebuilt. Tests in tests/test-n2md.tcl (42).
+
+## 2026-10-22 — n2md --tip700: Copyright-Folgezeilen
+
+- `Copyright:` im YAML-Kopf nimmt nach der ersten Copyright-Zeile auch die
+  folgenden Kommentarzeilen bis zur nächsten leeren mit („Contributions from
+  Don Porter, NIST, 2003.“ in return.n, catch.n, tcltest.n; „All rights
+  reserved.“). man2markdown nahm sie teils mit, teils nicht.
+- `tools/nroff2md.tcl` neu gebaut. Test in tests/test-n2md.tcl.
+
 ## 2026-10-21 — n2md: list descriptions, lost text, `--tip700`
 
 Measured with n2md over Tcl 9.0.5 and Tk 9.0 (231 pages), rendered with

@@ -518,7 +518,7 @@ proc nroffparser::handleLine {state line} {
         if {$mode eq "pre"} {
             set macro [lindex [split $line] 0]
             # Recognize closing macros
-            if {$macro eq ".fi" || $macro eq ".CE" || $macro eq ".DE" || $macro eq ".BE" || $macro eq ".SE" || $macro eq ".VE"} {
+            if {$macro eq ".fi" || $macro eq ".CE" || $macro eq ".DE" || $macro eq ".BE" || $macro eq ".SE" || $macro eq ".VE" || $macro eq ".PE"} {
                 debug::traceMacro $macro "in pre mode"
                 return [nroffparser::handleMacro $state $line]
             }
@@ -635,6 +635,16 @@ proc nroffparser::handleMacro {state line} {
             dict set state mode pre
             dict set state preText ""
         }
+        .PS {
+            # pic-Bild (doctools in tcllib: Baumgrafiken aus ASCII). Ohne pic
+            # bleibt nur der Text; als Codeblock, wie .nf (vorher landete
+            # ".PS .nf +- Digit ..." als Absatz im Text, pt_astree.n)
+            set state [nroffparser::flushParagraph $state]
+            set state [nroffparser::flushList $state]
+            dict set state mode pre
+            dict set state preText ""
+        }
+        .PE -
         .fi {
             set state [nroffparser::flushPre $state]
             dict set state mode normal
@@ -1480,6 +1490,9 @@ proc nroffparser::handleText {state line} {
 }
 
 proc nroffparser::handlePreLine {state line} {
+    # "\&.nf" / "\&.fi" in einem .PS-Bild (doctools): Steuerzeilen fuer pic,
+    # kein Inhalt
+    if {[regexp {^\\&\.(nf|fi)\s*$} $line]} { return $state }
     # Expand tabs if tab stops are set
     if {[dict exists $state tabStops]} {
         set tabStops [dict get $state tabStops]

@@ -115,6 +115,29 @@ test "tip700: Version 2.10 bleibt 2.10 (http.n)" {
     test::assertContains $m {[2.10]{.optlit}} "Uebersicht"
 }
 
+test "tip700: Copyright mit Folgezeile (return.n)" {
+    set nroff "'\\\"\n'\\\" Copyright (c) 1993 The Regents.\n'\\\" Contributions from Don Porter, NIST, 2003.\n'\\\"\n'\\\" See the file license.terms\n.TH return n 8.5 Tcl \"Tcl Built-In Commands\"\n.SH NAME\nreturn \\- x\n"
+    set m [n2md::tip700::render $nroff [docir::roff::fromAst [nroffparser::parse $nroff]]]
+    test::assertContains $m "Copyright:\n - Copyright (c) 1993 The Regents.\n - Contributions from Don Porter, NIST, 2003.\n---" "Folgezeile, nicht 'See the file'"
+}
+
+test "tip700: doctools package require (tcllib)" {
+    set m [md ".SH SYNOPSIS\npackage require \\fBTcl 8\\&.5 9\\fR\n.sp\npackage require \\fBbase64 ?2\\&.6\\&.1?\\fR\n.sp\n\\fB::base64::decode\\fR \\fIestring\\fR\n" 1]
+    test::assertContains $m {[package]{.cmd} [require]{.sub} [Tcl]{.lit} [8.5]{.lit} [9]{.lit} } "Tcl"
+    test::assertContains $m {[package]{.cmd} [require]{.sub} [base64]{.lit} [2.6.1]{.optlit} } "Version optional"
+}
+
+test "n2md: .PS/.PE als Codeblock (tcllib pt_astree.n)" {
+    set m [md ".SH D\nOr, more graphical\n.PP\n.PS\n\\&.nf\n+- Digit 0 0 | 1\n|            |\n\\&.fi\n.PE\nafter\n"]
+    test::assertContains $m "```\n+- Digit 0 0 | 1\n|            |\n```" "Bild als Code, ohne .nf/.fi"
+    assert [expr {[string first ".PS" $m] < 0}] "kein .PS im Text"
+}
+
+test "n2md: doctools-Verweise als Link" {
+    set md "as in *RFC 4648* \\\[https://example.org/rfc\\_x\\\] and \\\[http://a.b/c\\\]."
+    test::assertContains [n2md::tip700::uriLinks $md] {as in [RFC 4648](https://example.org/rfc_x) and <http://a.b/c>.} "Link und nackte URL"
+}
+
 test "tip700: Ueberschriften" {
     set m [md ".SH \"WIDGET-SPECIFIC OPTIONS\"\nx\n.SS \"FLAVORS OF REs\"\ny\n" 1]
     test::assertContains $m "# Widget-specific options\n" ".SH"

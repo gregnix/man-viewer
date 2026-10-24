@@ -107,6 +107,7 @@ proc convertFile {inputFile outputFile {tip700 0}} {
         } else {
             set md [docir::md::render $ir]
         }
+        set md [n2md::tip700::uriLinks $md]
     } err]} {
         puts stderr "Error converting $inputFile: $err"
         return 0

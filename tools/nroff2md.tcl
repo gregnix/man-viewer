@@ -1809,7 +1809,7 @@ proc nroffparser::handleLine {state line} {
         if {$mode eq "pre"} {
             set macro [lindex [split $line] 0]
             # Recognize closing macros
-            if {$macro eq ".fi" || $macro eq ".CE" || $macro eq ".DE" || $macro eq ".BE" || $macro eq ".SE" || $macro eq ".VE"} {
+            if {$macro eq ".fi" || $macro eq ".CE" || $macro eq ".DE" || $macro eq ".BE" || $macro eq ".SE" || $macro eq ".VE" || $macro eq ".PE"} {
                 debug::traceMacro $macro "in pre mode"
                 return [nroffparser::handleMacro $state $line]
             }
@@ -1926,6 +1926,16 @@ proc nroffparser::handleMacro {state line} {
             dict set state mode pre
             dict set state preText ""
         }
+        .PS {
+            # pic-Bild (doctools in tcllib: Baumgrafiken aus ASCII). Ohne pic
+            # bleibt nur der Text; als Codeblock, wie .nf (vorher landete
+            # ".PS .nf +- Digit ..." als Absatz im Text, pt_astree.n)
+            set state [nroffparser::flushParagraph $state]
+            set state [nroffparser::flushList $state]
+            dict set state mode pre
+            dict set state preText ""
+        }
+        .PE -
         .fi {
             set state [nroffparser::flushPre $state]
             dict set state mode normal
@@ -2771,6 +2781,9 @@ proc nroffparser::handleText {state line} {
 }
 
 proc nroffparser::handlePreLine {state line} {
+    # "\&.nf" / "\&.fi" in einem .PS-Bild (doctools): Steuerzeilen fuer pic,
+    # kein Inhalt
+    if {[regexp {^\\&\.(nf|fi)\s*$} $line]} { return $state }
     # Expand tabs if tab stops are set
     if {[dict exists $state tabStops]} {
         set tabStops [dict get $state tabStops]
@@ -4844,6 +4857,17 @@ proc docir::md::_renderList {node} {
                     append out "${indent}: \n"
                 }
                 append out "\n"
+                # Item with further blocks (listItem.blocks: paragraphs, a
+                # nested list, code -- htmlSource from <dd>): the first
+                # paragraph is the description above, the rest follows flat,
+                # like nested nroff lists (mdstack reads ": " only in column 0).
+                if {[dict exists $item blocks]} {
+                    set rest [dict get $item blocks]
+                    if {[llength $rest] && [dict get [lindex $rest 0] type] eq "paragraph"} {
+                        set rest [lrange $rest 1 end]
+                    }
+                    foreach b $rest { append out [_renderBlock $b] }
+                }
             }
             default {
                 # ul + unknown
@@ -5338,10 +5362,18 @@ proc n2md::tip700::_head {nroffText ir} {
         if {$th eq "" && [regexp {^\.TH\s+(.*)$} $z -> rest]} {
             set th [_args $rest]
         }
-        # Kommentar: '\" oder .\"
-        if {[regexp {^(?:'|\.)\\"\s*(.*)$} $z -> c]
-                && [regexp -nocase {^copyright\M} [string trim $c]]} {
-            lappend copy [regsub -all {\s+} [_plain $c] " "]
+        # Kommentar: '\" oder .\" -- ab der ersten Copyright-Zeile bis zur
+        # naechsten leeren Kommentarzeile ("Contributions from Don Porter,
+        # NIST, 2003." in return.n gehoert dazu; man2markdown nahm sie mit)
+        if {[regexp {^(?:'|\.)\\"\s*(.*)$} $z -> c]} {
+            set c [string trim $c]
+            if {[regexp -nocase {^copyright\M} $c]} { set inCopy 1 }
+            if {$c eq ""} { set inCopy 0 }
+            if {[info exists inCopy] && $inCopy} {
+                lappend copy [regsub -all {\s+} [_plain $c] " "]
+            }
+        } elseif {[info exists inCopy]} {
+            set inCopy 0
         }
     }
     lassign $th name sect ver part desc
@@ -5495,6 +5527,9 @@ proc n2md::tip700::_span {txt cls} {
 proc n2md::tip700::_isCmdLine {words} {
     if {![llength $words]} { return 0 }
     lassign [lindex $words 0] w st
+    # doctools (tcllib, tklib): "package require \fBbase64 ?2.6.1?\fR",
+    # die ersten zwei Woerter ohne Schrift
+    if {$w eq "package" && [lindex $words 1 0] eq "require"} { return 1 }
     if {$st eq "strong" && [string index $w 0] ne "?"} { return 1 }
     if {$st eq "emphasis" && [llength $words] > 1
             && [lindex $words 1 1] eq "strong"} { return 1 }
@@ -5507,6 +5542,20 @@ proc n2md::tip700::_synLine {words} {
     set i 0
     # Kopf: .cmd/.sub/.lit oder .ins/.sub
     lassign [lindex $words 0] w st
+    if {$w eq "package" && [lindex $words 1 0] eq "require" && $st ne "strong"} {
+        lappend out [_span package cmd] [_span require sub]
+        set i 2
+        while {$i < $n} {
+            lassign [lindex $words $i] w st
+            if {[regexp {^\?(.+)\?$} $w -> v]} {
+                lappend out [_span $v optlit]
+            } else {
+                lappend out [_span $w lit]
+            }
+            incr i
+        }
+        return "[join $out " "] "
+    }
     if {$st eq "strong"} {
         lappend out [_span $w cmd]
         incr i
@@ -5728,6 +5777,28 @@ proc n2md::tip700::render {nroffText ir} {
     return "[_head $nroffText $ir]$body"
 }
 
+# doctools schreibt Verweise als "\fIRFC 4648\fR [https://...]" (tcllib,
+# tklib); im Markdown stand dann "*RFC 4648* \[https://...\]". Daraus ein
+# Link; eine URL ohne Text davor wird <https://...>.
+proc n2md::tip700::uriLinks {md} {
+    set re {(?:\*([^*\n]+)\* )?\\\[((?:https?|ftp|mailto):[^\s\]]+?)\\\]}
+    set out ""
+    set pos 0
+    while {[regexp -indices -start $pos $re $md m t u]} {
+        lassign $m a b
+        append out [string range $md $pos [expr {$a - 1}]]
+        set url [string map {\\_ _ \\* * \\$ $ \\< <} [string range $md {*}$u]]
+        if {[lindex $t 0] >= 0} {
+            append out "\[[string range $md {*}$t]\]($url)"
+        } else {
+            append out "<$url>"
+        }
+        set pos [expr {$b + 1}]
+    }
+    append out [string range $md $pos end]
+    return $out
+}
+
 package provide n2md::tip700 0.1
 
 # MAIN -- Argument-Verarbeitung und Konvertierung
@@ -5786,6 +5857,7 @@ proc convertFile {inputFile outputFile lang linkmode {indexLink ""} {tip700 fals
         } else {
             set md [docir::md::render $ir [list linkResolve [list linkTarget $linkmode]]]
         }
+        set md [n2md::tip700::uriLinks $md]
     } err]} {
         puts stderr "Error converting $inputFile: $err"
         return {0 {}}
