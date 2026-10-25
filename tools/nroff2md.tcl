@@ -1844,6 +1844,15 @@ proc nroffparser::handleLine {state line} {
                 debug::traceMacro $macro "in pre mode"
                 return [nroffparser::handleMacro $state $line]
             }
+            # Schriftmakros im Block (libexpect.man: SYNOPSIS mit .nf und .B)
+            if {$macro in {.B .I .R .BI .IB .BR .RB .IR .RI .SB .SM}} {
+                set t [nroffparser::fontMacro $macro [string range $line [string length $macro] end]]
+                if {$t eq ""} {
+                    dict set state nextLineFont [string index $macro 1]
+                    return $state
+                }
+                return [nroffparser::handlePreLine $state $t]
+            }
             # Otherwise, treat as preformatted text
             return [nroffparser::handlePreLine $state $line]
         }
@@ -2039,8 +2048,12 @@ proc nroffparser::handleMacro {state line} {
             set state [nroffparser::handleTA $state $rest]
         }
         .AP {
-            # Argument parameter (Tcl/Tk specific) - skip it, content is on next line
-            return $state
+            # Argument der C-Schnittstelle (.3): .AP Typ Name ?in|out|in/out? ?Einzug?
+            # Bis 2026-10-24 uebersprungen: Typ, Name und Richtung gingen
+            # verloren, die Beschreibungen liefen zu einem Absatz zusammen
+            # (717 Eintraege in den Tcl-9.0-Seiten).
+            set state [nroffparser::flushParagraph $state]
+            set state [nroffparser::handleAP $state $rest]
         }
         .AS {
             # Argument start (Tcl/Tk specific) - skip it
@@ -2215,6 +2228,17 @@ proc nroffparser::handleMacro {state line} {
             set state [nroffparser::appendInline $state $quotedText]
             return $state
         }
+        .B - .I - .R - .BI - .IB - .BR - .RB - .IR - .RI - .SB - .SM {
+            # Schriftmakros der man-Seiten (Expect; Tcl/Tk nutzt sie nicht).
+            # Bis 2026-10-24 als Text ausgegeben: ".B Expect reads .I cmdfile"
+            set t [nroffparser::fontMacro $macro $rest]
+            if {$t eq ""} {
+                # ohne Argument: gilt fuer die naechste Textzeile
+                dict set state nextLineFont [string index $macro 1]
+                return $state
+            }
+            return [nroffparser::handleText $state $t]
+        }
         default {
             # Unknown macro - treat as text
             return [nroffparser::handleText $state $line]
@@ -2222,6 +2246,39 @@ proc nroffparser::handleMacro {state line} {
     }
     
     return $state
+}
+
+# Schriftmakro -> Text mit \f-Wechseln. .B/.I/.SB: Argumente mit
+# Leerzeichen; .BR, .IR usw.: Argumente abwechselnd in zwei Schriften,
+# ohne Leerzeichen dazwischen (".BR Tk 's" -> "\fBTk\fR's"). .SM (kleiner)
+# und .R: normale Schrift. Ohne Argument "".
+proc nroffparser::fontMacro {macro rest} {
+    set args [nroffparser::macroArgs [string trim $rest]]
+    if {![llength $args]} { return "" }
+    set m [string range $macro 1 end]
+    switch -- $m {
+        B - SB { return "\\fB[join $args { }]\\fR" }
+        I      { return "\\fI[join $args { }]\\fR" }
+        R - SM { return [join $args " "] }
+    }
+    set fonts [split $m ""]
+    set out ""
+    set k 0
+    foreach a $args {
+        append out "\\f[lindex $fonts [expr {$k % 2}]]$a"
+        incr k
+    }
+    return "$out\\fR"
+}
+
+# ".I" ohne Argument: die naechste Textzeile kursiv
+proc nroffparser::takeNextLineFont {stateVar lineVar} {
+    upvar 1 $stateVar state $lineVar line
+    if {[dict exists $state nextLineFont] && [dict get $state nextLineFont] ne ""
+            && [string trim $line] ne ""} {
+        set line "\\f[dict get $state nextLineFont]$line\\fR"
+        dict set state nextLineFont ""
+    }
 }
 
 # Argumente einer Makrozeile wie nroff: "..." (Anfuehrung, auch leer) oder Wort.
@@ -2411,6 +2468,53 @@ proc nroffparser::handleOP {state rest} {
     lappend currentList [dict create term $term desc ""]
     dict set state currentList $currentList
     
+    return $state
+}
+
+proc nroffparser::handleAP {state rest} {
+    # .AP type name ?direction? ?indent?  (man.macros der Tcl/Tk-Quellen)
+    # Typ und Name koennen in Anfuehrungszeichen stehen ("const char" *path).
+    # Ergebnis: Listeneintrag der Art "ap" mit dem Begriff
+    #   Typ \fIName\fR (Richtung)
+    # -- dieselbe Form wie die Argumentzeilen der doctools-Seiten
+    # ("Tcl_Interp *interp* (in)"). Der Text bis zum naechsten .AP ist die
+    # Beschreibung, wie bei .TP.
+    set parts {}
+    set inQuotes 0
+    set current ""
+    set had 0
+    foreach char [split $rest ""] {
+        if {$char eq "\""} {
+            set inQuotes [expr {!$inQuotes}]
+            set had 1
+        } elseif {[string is space $char] && !$inQuotes} {
+            if {$current ne "" || $had} {
+                lappend parts $current
+                set current ""
+                set had 0
+            }
+        } else {
+            append current $char
+        }
+    }
+    if {$current ne "" || $had} { lappend parts $current }
+
+    set type [lindex $parts 0]
+    set name [lindex $parts 1]
+    set dir  [lindex $parts 2]
+    set term $type
+    if {$name ne ""} { append term " \\fI$name\\fR" }
+    if {$dir in {in out in/out}} { append term " ($dir)" }
+
+    set currentList [dict get $state currentList]
+    set listKind ""
+    if {[dict exists $state listKind]} { set listKind [dict get $state listKind] }
+    if {[llength $currentList] == 0 || $listKind ne "ap"} {
+        set state [nroffparser::startList $state ap]
+        set currentList [dict get $state currentList]
+    }
+    lappend currentList [dict create term $term desc ""]
+    dict set state currentList $currentList
     return $state
 }
 
@@ -2697,6 +2801,7 @@ proc nroffparser::expandTabs {line tabStops} {
 # ============================================================
 
 proc nroffparser::handleText {state line} {
+    nroffparser::takeNextLineFont state line
     # Empty line flushes paragraph
     if {[string trim $line] eq ""} {
         return [nroffparser::flushParagraph $state]
@@ -2784,6 +2889,7 @@ proc nroffparser::handlePreLine {state line} {
     # "\&.nf" / "\&.fi" in einem .PS-Bild (doctools): Steuerzeilen fuer pic,
     # kein Inhalt
     if {[regexp {^\\&\.(nf|fi)\s*$} $line]} { return $state }
+    nroffparser::takeNextLineFont state line
     # Expand tabs if tab stops are set
     if {[dict exists $state tabStops]} {
         set tabStops [dict get $state tabStops]
@@ -3427,8 +3533,11 @@ proc nroffparser::parseInlines {text} {
         }
     }
     
-    # If no inlines were created, create at least one text node
-    if {[llength $inlines] == 0 && $text ne ""} {
+    # If no inlines were created, create at least one text node --
+    # aber nicht, wenn der Text nur aus Steuerzeichen bestand: "\&\fR"
+    # (tdom, nach jedem .TP-Begriff) kam sonst roh als "\\&\\fR" in die
+    # Ausgabe (2026-10-24)
+    if {[llength $inlines] == 0 && $text ne "" && [string first "\\" $text] < 0} {
         lappend inlines [dict create type text text $text]
     }
     set inlines [nroffparser::mergeInlines $inlines]
@@ -4794,6 +4903,7 @@ proc docir::md::_renderList {node} {
                 # If descMd contains newlines: indent the further lines
                 set descMd [_indentContinuationLines $descMd 4]
                 append out "${indent}${ord}. $descMd\n"
+                append out [_itemBlocks $item "${indent}    "]
                 incr ord
             }
             tp - ip - op - ap - dl {
@@ -4874,10 +4984,33 @@ proc docir::md::_renderList {node} {
                 set marker [dict get $opts listMarker]
                 set descMd [_indentContinuationLines $descMd [expr {[string length $marker] + 1}]]
                 append out "${indent}$marker $descMd\n"
+                append out [_itemBlocks $item "${indent}[string repeat { } [expr {[string length $marker] + 1}]]"]
             }
         }
     }
     return "$out\n"
+}
+
+# Further blocks of a bullet or numbered item (listItem.blocks without the
+# first paragraph, which is the item line): indented to the item's text, so
+# they stay inside the item -- a code block, a quote, another paragraph.
+proc docir::md::_itemBlocks {item pad} {
+    if {![dict exists $item blocks]} { return "" }
+    set rest [dict get $item blocks]
+    if {[llength $rest] && [dict get [lindex $rest 0] type] eq "paragraph"} {
+        set rest [lrange $rest 1 end]
+    }
+    set out ""
+    foreach b $rest {
+        set md [string trimright [_renderBlock $b] "\n"]
+        if {$md eq ""} continue
+        append out "\n"
+        foreach line [split $md "\n"] {
+            if {$line eq ""} { append out "\n" } else { append out "$pad$line\n" }
+        }
+    }
+    if {$out ne ""} { append out "\n" }
+    return $out
 }
 
 proc docir::md::_renderListItem {node} {
@@ -5320,7 +5453,10 @@ proc docir::md::_indentContinuationLines {text indent} {
 package require Tcl 8.6-
 package require docir::md
 
-namespace eval n2md::tip700 {}
+namespace eval n2md::tip700 {
+    # Abschnitt 3 (C-Schnittstelle): Uebersicht mit _cLine; setzt render
+    variable cApi 0
+}
 
 # ------------------------------------------------------------
 # YAML-Kopf
@@ -5624,6 +5760,94 @@ proc n2md::tip700::_synLine {words} {
     return "[join $out " "] "
 }
 
+# C-Schnittstelle (.3): eine Zeile Segment fuer Segment. _words taugt
+# hier nicht, es fasst "\fBTcl_Alloc\fR(\fIsize\fR)" ohne Leerzeichen
+# zu einem Wort zusammen. Bezeichner im Fett: der erste .cmd, weitere
+# .lit; Bezeichner im Kursiv: .arg; Typen, Klammern, "*", "," und ";"
+# bleiben Text. "#include <tcl.h>" -> .cmd und .lit.
+proc n2md::tip700::_cLine {segs} {
+    set roh [string trim [join [lmap s $segs {lindex $s 1}] ""]]
+    if {[regexp {^#include\s+(\S+)$} $roh -> datei]} {
+        return "[_span #include cmd] [_span $datei lit]"
+    }
+    # Ganze Zeile fett (alter Stil, libexpect.man: ".B int",
+    # ".B exp_spawnv(file,argv);"): nur der Name vor "(" ist .cmd,
+    # Typen und Argumente bleiben Text
+    set nurFett 1
+    foreach seg $segs {
+        if {[lindex $seg 0] ne "strong" && [regexp {[[:alnum:]]} [lindex $seg 1]]} {
+            set nurFett 0
+        }
+    }
+    if {$nurFett} {
+        set out ""
+        set pos 0
+        set re {[A-Za-z_][A-Za-z0-9_]*}
+        while {[regexp -indices -start $pos $re $roh m]} {
+            lassign $m a b
+            append out [docir::md::_escapeMd [string range $roh $pos [expr {$a - 1}]]]
+            set w [string range $roh $a $b]
+            set danach [string range $roh [expr {$b + 1}] end]
+            # "void (*exp_close_in_child)()": Funktionszeiger, kein Name
+            if {[regexp {^\s*\(} $danach] && ![regexp {^\s*\(\s*\*} $danach]} {
+                append out [_span $w cmd]
+            } else {
+                append out [docir::md::_escapeMd $w]
+            }
+            set pos [expr {$b + 1}]
+        }
+        append out [docir::md::_escapeMd [string range $roh $pos end]]
+        return $out
+    }
+    set out ""
+    set hatCmd 0
+    foreach seg $segs {
+        lassign $seg st txt
+        set pos 0
+        set re {[A-Za-z_][A-Za-z0-9_]*}
+        while {[regexp -indices -start $pos $re $txt m]} {
+            lassign $m a b
+            append out [docir::md::_escapeMd [string range $txt $pos [expr {$a - 1}]]]
+            set w [string range $txt $a $b]
+            switch -- $st {
+                strong {
+                    append out [_span $w [expr {$hatCmd ? "lit" : "cmd"}]]
+                    set hatCmd 1
+                }
+                emphasis { append out [_span $w arg] }
+                default  { append out [docir::md::_escapeMd $w] }
+            }
+            set pos [expr {$b + 1}]
+        }
+        append out [docir::md::_escapeMd [string range $txt $pos end]]
+    }
+    return [string trim $out]
+}
+
+# "\" am Zeilenende (Fortsetzung, Tk_PhotoPutBlock in FindPhoto.3)
+# kommt als Zeichen an: Zeile mit der naechsten verbinden
+proc n2md::tip700::_joinCont {lines} {
+    set out {}
+    set offen 0
+    foreach segs $lines {
+        if {$offen} {
+            set vorher [lindex $out end]
+            set out [lreplace $out end end [concat $vorher $segs]]
+        } else {
+            lappend out $segs
+        }
+        set offen 0
+        set letzte [lindex $out end end]
+        if {[llength $letzte] && [string index [lindex $letzte 1] end] eq "\\"} {
+            set t [string range [lindex $letzte 1] 0 end-1]
+            set neu [lreplace [lindex $out end] end end [list [lindex $letzte 0] "$t "]]
+            set out [lreplace $out end end $neu]
+            set offen 1
+        }
+    }
+    return $out
+}
+
 # Bloecke des SYNOPSIS-Abschnitts -> Liste von IR-Knoten
 proc n2md::tip700::_synopsis {nodes} {
     set out {}
@@ -5635,15 +5859,26 @@ proc n2md::tip700::_synopsis {nodes} {
             lappend prosa $node
             continue
         }
+        # C-Seiten: Prototypen stehen in .nf; Fliesstext mit fetten
+        # Woertern bleibt Text (libexpect.man, erster SYNOPSIS-Abschnitt)
+        if {$::n2md::tip700::cApi && $t ne "pre"} {
+            lappend prosa $node
+            continue
+        }
         set zeilen {}
         set befehl 0
-        foreach segs [_lines [dict get $node content]] {
+        set alleZeilen [_lines [dict get $node content]]
+        if {$::n2md::tip700::cApi} { set alleZeilen [_joinCont $alleZeilen] }
+        foreach segs $alleZeilen {
             set words [_words $segs]
             if {![llength $words]} {
                 lappend zeilen ""
                 continue
             }
-            if {[_isCmdLine $words]} {
+            if {$::n2md::tip700::cApi} {
+                lappend zeilen [_cLine $segs]
+                if {"strong" in [lmap x $segs {lindex $x 0}]} { set befehl 1 }
+            } elseif {[_isCmdLine $words]} {
                 lappend zeilen [_synLine $words]
                 set befehl 1
             } elseif {![regexp {[[:alnum:]]} [join [lmap w $words {lindex $w 0}] ""]]} {
@@ -5773,6 +6008,8 @@ proc n2md::tip700::transform {ir} {
 }
 
 proc n2md::tip700::render {nroffText ir} {
+    set ::n2md::tip700::cApi [regexp -line \
+        {^\.TH\s+(?:"[^"]*"|\S+)\s+"?3} $nroffText]
     set body [docir::md::render [transform $ir] {headingShift 0 opDbStrong 1}]
     return "[_head $nroffText $ir]$body"
 }

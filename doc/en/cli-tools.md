@@ -151,3 +151,19 @@ Mit DocIR-Hub (Mai 2026):
   tclsh tools/build-nroff2md.tcl [--docir ../docir/lib/tm]
   tclsh tools/build-nroff2md.tcl --check    # Exit 1, wenn veraltet
   ```
+
+- Ausführbare Einzeldatei `tools/nroff2md.bin` (seit 2026-10-24): ein
+  Tcl-9-tclsh mit angehängtem ZIP (`zipfs mkimg`), darin
+  `nroff2md.tcl`. Gleiche Ausgabe und Optionen wie `nroff2md.tcl`.
+
+  ```bash
+  tclsh9.0 tools/build-nroff2md-bin.tcl                    # Vorlage: laufender tclsh
+  tclsh9.0 tools/build-nroff2md-bin.tcl --template tclsh90s  # statisch: ohne libtcl
+  tools/nroff2md.bin seite.n seite.md --tip700
+  ```
+
+  Mit einem dynamisch gelinkten tclsh als Vorlage (`/opt/tcl9/bin/tclsh9.0`)
+  braucht die `.bin` zur Laufzeit dessen `libtcl9.0.so` (RUNPATH
+  `/opt/tcl9/lib`). Erst ein statischer tclsh (BAWT, Magicsplat) ergibt
+  eine Datei, die auch auf Rechnern ohne Tcl läuft. Reihenfolge nach
+  Änderungen: erst `build-nroff2md.tcl`, dann `build-nroff2md-bin.tcl`.

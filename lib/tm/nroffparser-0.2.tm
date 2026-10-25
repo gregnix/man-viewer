@@ -553,6 +553,15 @@ proc nroffparser::handleLine {state line} {
                 debug::traceMacro $macro "in pre mode"
                 return [nroffparser::handleMacro $state $line]
             }
+            # Schriftmakros im Block (libexpect.man: SYNOPSIS mit .nf und .B)
+            if {$macro in {.B .I .R .BI .IB .BR .RB .IR .RI .SB .SM}} {
+                set t [nroffparser::fontMacro $macro [string range $line [string length $macro] end]]
+                if {$t eq ""} {
+                    dict set state nextLineFont [string index $macro 1]
+                    return $state
+                }
+                return [nroffparser::handlePreLine $state $t]
+            }
             # Otherwise, treat as preformatted text
             return [nroffparser::handlePreLine $state $line]
         }
@@ -748,8 +757,12 @@ proc nroffparser::handleMacro {state line} {
             set state [nroffparser::handleTA $state $rest]
         }
         .AP {
-            # Argument parameter (Tcl/Tk specific) - skip it, content is on next line
-            return $state
+            # Argument der C-Schnittstelle (.3): .AP Typ Name ?in|out|in/out? ?Einzug?
+            # Bis 2026-10-24 uebersprungen: Typ, Name und Richtung gingen
+            # verloren, die Beschreibungen liefen zu einem Absatz zusammen
+            # (717 Eintraege in den Tcl-9.0-Seiten).
+            set state [nroffparser::flushParagraph $state]
+            set state [nroffparser::handleAP $state $rest]
         }
         .AS {
             # Argument start (Tcl/Tk specific) - skip it
@@ -924,6 +937,17 @@ proc nroffparser::handleMacro {state line} {
             set state [nroffparser::appendInline $state $quotedText]
             return $state
         }
+        .B - .I - .R - .BI - .IB - .BR - .RB - .IR - .RI - .SB - .SM {
+            # Schriftmakros der man-Seiten (Expect; Tcl/Tk nutzt sie nicht).
+            # Bis 2026-10-24 als Text ausgegeben: ".B Expect reads .I cmdfile"
+            set t [nroffparser::fontMacro $macro $rest]
+            if {$t eq ""} {
+                # ohne Argument: gilt fuer die naechste Textzeile
+                dict set state nextLineFont [string index $macro 1]
+                return $state
+            }
+            return [nroffparser::handleText $state $t]
+        }
         default {
             # Unknown macro - treat as text
             return [nroffparser::handleText $state $line]
@@ -931,6 +955,39 @@ proc nroffparser::handleMacro {state line} {
     }
     
     return $state
+}
+
+# Schriftmakro -> Text mit \f-Wechseln. .B/.I/.SB: Argumente mit
+# Leerzeichen; .BR, .IR usw.: Argumente abwechselnd in zwei Schriften,
+# ohne Leerzeichen dazwischen (".BR Tk 's" -> "\fBTk\fR's"). .SM (kleiner)
+# und .R: normale Schrift. Ohne Argument "".
+proc nroffparser::fontMacro {macro rest} {
+    set args [nroffparser::macroArgs [string trim $rest]]
+    if {![llength $args]} { return "" }
+    set m [string range $macro 1 end]
+    switch -- $m {
+        B - SB { return "\\fB[join $args { }]\\fR" }
+        I      { return "\\fI[join $args { }]\\fR" }
+        R - SM { return [join $args " "] }
+    }
+    set fonts [split $m ""]
+    set out ""
+    set k 0
+    foreach a $args {
+        append out "\\f[lindex $fonts [expr {$k % 2}]]$a"
+        incr k
+    }
+    return "$out\\fR"
+}
+
+# ".I" ohne Argument: die naechste Textzeile kursiv
+proc nroffparser::takeNextLineFont {stateVar lineVar} {
+    upvar 1 $stateVar state $lineVar line
+    if {[dict exists $state nextLineFont] && [dict get $state nextLineFont] ne ""
+            && [string trim $line] ne ""} {
+        set line "\\f[dict get $state nextLineFont]$line\\fR"
+        dict set state nextLineFont ""
+    }
 }
 
 # Argumente einer Makrozeile wie nroff: "..." (Anfuehrung, auch leer) oder Wort.
@@ -1120,6 +1177,53 @@ proc nroffparser::handleOP {state rest} {
     lappend currentList [dict create term $term desc ""]
     dict set state currentList $currentList
     
+    return $state
+}
+
+proc nroffparser::handleAP {state rest} {
+    # .AP type name ?direction? ?indent?  (man.macros der Tcl/Tk-Quellen)
+    # Typ und Name koennen in Anfuehrungszeichen stehen ("const char" *path).
+    # Ergebnis: Listeneintrag der Art "ap" mit dem Begriff
+    #   Typ \fIName\fR (Richtung)
+    # -- dieselbe Form wie die Argumentzeilen der doctools-Seiten
+    # ("Tcl_Interp *interp* (in)"). Der Text bis zum naechsten .AP ist die
+    # Beschreibung, wie bei .TP.
+    set parts {}
+    set inQuotes 0
+    set current ""
+    set had 0
+    foreach char [split $rest ""] {
+        if {$char eq "\""} {
+            set inQuotes [expr {!$inQuotes}]
+            set had 1
+        } elseif {[string is space $char] && !$inQuotes} {
+            if {$current ne "" || $had} {
+                lappend parts $current
+                set current ""
+                set had 0
+            }
+        } else {
+            append current $char
+        }
+    }
+    if {$current ne "" || $had} { lappend parts $current }
+
+    set type [lindex $parts 0]
+    set name [lindex $parts 1]
+    set dir  [lindex $parts 2]
+    set term $type
+    if {$name ne ""} { append term " \\fI$name\\fR" }
+    if {$dir in {in out in/out}} { append term " ($dir)" }
+
+    set currentList [dict get $state currentList]
+    set listKind ""
+    if {[dict exists $state listKind]} { set listKind [dict get $state listKind] }
+    if {[llength $currentList] == 0 || $listKind ne "ap"} {
+        set state [nroffparser::startList $state ap]
+        set currentList [dict get $state currentList]
+    }
+    lappend currentList [dict create term $term desc ""]
+    dict set state currentList $currentList
     return $state
 }
 
@@ -1406,6 +1510,7 @@ proc nroffparser::expandTabs {line tabStops} {
 # ============================================================
 
 proc nroffparser::handleText {state line} {
+    nroffparser::takeNextLineFont state line
     # Empty line flushes paragraph
     if {[string trim $line] eq ""} {
         return [nroffparser::flushParagraph $state]
@@ -1493,6 +1598,7 @@ proc nroffparser::handlePreLine {state line} {
     # "\&.nf" / "\&.fi" in einem .PS-Bild (doctools): Steuerzeilen fuer pic,
     # kein Inhalt
     if {[regexp {^\\&\.(nf|fi)\s*$} $line]} { return $state }
+    nroffparser::takeNextLineFont state line
     # Expand tabs if tab stops are set
     if {[dict exists $state tabStops]} {
         set tabStops [dict get $state tabStops]
@@ -2136,8 +2242,11 @@ proc nroffparser::parseInlines {text} {
         }
     }
     
-    # If no inlines were created, create at least one text node
-    if {[llength $inlines] == 0 && $text ne ""} {
+    # If no inlines were created, create at least one text node --
+    # aber nicht, wenn der Text nur aus Steuerzeichen bestand: "\&\fR"
+    # (tdom, nach jedem .TP-Begriff) kam sonst roh als "\\&\\fR" in die
+    # Ausgabe (2026-10-24)
+    if {[llength $inlines] == 0 && $text ne "" && [string first "\\" $text] < 0} {
         lappend inlines [dict create type text text $text]
     }
     set inlines [nroffparser::mergeInlines $inlines]

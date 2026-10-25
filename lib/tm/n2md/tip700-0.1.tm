@@ -46,7 +46,10 @@
 package require Tcl 8.6-
 package require docir::md
 
-namespace eval n2md::tip700 {}
+namespace eval n2md::tip700 {
+    # Abschnitt 3 (C-Schnittstelle): Uebersicht mit _cLine; setzt render
+    variable cApi 0
+}
 
 # ------------------------------------------------------------
 # YAML-Kopf
@@ -350,6 +353,94 @@ proc n2md::tip700::_synLine {words} {
     return "[join $out " "] "
 }
 
+# C-Schnittstelle (.3): eine Zeile Segment fuer Segment. _words taugt
+# hier nicht, es fasst "\fBTcl_Alloc\fR(\fIsize\fR)" ohne Leerzeichen
+# zu einem Wort zusammen. Bezeichner im Fett: der erste .cmd, weitere
+# .lit; Bezeichner im Kursiv: .arg; Typen, Klammern, "*", "," und ";"
+# bleiben Text. "#include <tcl.h>" -> .cmd und .lit.
+proc n2md::tip700::_cLine {segs} {
+    set roh [string trim [join [lmap s $segs {lindex $s 1}] ""]]
+    if {[regexp {^#include\s+(\S+)$} $roh -> datei]} {
+        return "[_span #include cmd] [_span $datei lit]"
+    }
+    # Ganze Zeile fett (alter Stil, libexpect.man: ".B int",
+    # ".B exp_spawnv(file,argv);"): nur der Name vor "(" ist .cmd,
+    # Typen und Argumente bleiben Text
+    set nurFett 1
+    foreach seg $segs {
+        if {[lindex $seg 0] ne "strong" && [regexp {[[:alnum:]]} [lindex $seg 1]]} {
+            set nurFett 0
+        }
+    }
+    if {$nurFett} {
+        set out ""
+        set pos 0
+        set re {[A-Za-z_][A-Za-z0-9_]*}
+        while {[regexp -indices -start $pos $re $roh m]} {
+            lassign $m a b
+            append out [docir::md::_escapeMd [string range $roh $pos [expr {$a - 1}]]]
+            set w [string range $roh $a $b]
+            set danach [string range $roh [expr {$b + 1}] end]
+            # "void (*exp_close_in_child)()": Funktionszeiger, kein Name
+            if {[regexp {^\s*\(} $danach] && ![regexp {^\s*\(\s*\*} $danach]} {
+                append out [_span $w cmd]
+            } else {
+                append out [docir::md::_escapeMd $w]
+            }
+            set pos [expr {$b + 1}]
+        }
+        append out [docir::md::_escapeMd [string range $roh $pos end]]
+        return $out
+    }
+    set out ""
+    set hatCmd 0
+    foreach seg $segs {
+        lassign $seg st txt
+        set pos 0
+        set re {[A-Za-z_][A-Za-z0-9_]*}
+        while {[regexp -indices -start $pos $re $txt m]} {
+            lassign $m a b
+            append out [docir::md::_escapeMd [string range $txt $pos [expr {$a - 1}]]]
+            set w [string range $txt $a $b]
+            switch -- $st {
+                strong {
+                    append out [_span $w [expr {$hatCmd ? "lit" : "cmd"}]]
+                    set hatCmd 1
+                }
+                emphasis { append out [_span $w arg] }
+                default  { append out [docir::md::_escapeMd $w] }
+            }
+            set pos [expr {$b + 1}]
+        }
+        append out [docir::md::_escapeMd [string range $txt $pos end]]
+    }
+    return [string trim $out]
+}
+
+# "\" am Zeilenende (Fortsetzung, Tk_PhotoPutBlock in FindPhoto.3)
+# kommt als Zeichen an: Zeile mit der naechsten verbinden
+proc n2md::tip700::_joinCont {lines} {
+    set out {}
+    set offen 0
+    foreach segs $lines {
+        if {$offen} {
+            set vorher [lindex $out end]
+            set out [lreplace $out end end [concat $vorher $segs]]
+        } else {
+            lappend out $segs
+        }
+        set offen 0
+        set letzte [lindex $out end end]
+        if {[llength $letzte] && [string index [lindex $letzte 1] end] eq "\\"} {
+            set t [string range [lindex $letzte 1] 0 end-1]
+            set neu [lreplace [lindex $out end] end end [list [lindex $letzte 0] "$t "]]
+            set out [lreplace $out end end $neu]
+            set offen 1
+        }
+    }
+    return $out
+}
+
 # Bloecke des SYNOPSIS-Abschnitts -> Liste von IR-Knoten
 proc n2md::tip700::_synopsis {nodes} {
     set out {}
@@ -361,15 +452,26 @@ proc n2md::tip700::_synopsis {nodes} {
             lappend prosa $node
             continue
         }
+        # C-Seiten: Prototypen stehen in .nf; Fliesstext mit fetten
+        # Woertern bleibt Text (libexpect.man, erster SYNOPSIS-Abschnitt)
+        if {$::n2md::tip700::cApi && $t ne "pre"} {
+            lappend prosa $node
+            continue
+        }
         set zeilen {}
         set befehl 0
-        foreach segs [_lines [dict get $node content]] {
+        set alleZeilen [_lines [dict get $node content]]
+        if {$::n2md::tip700::cApi} { set alleZeilen [_joinCont $alleZeilen] }
+        foreach segs $alleZeilen {
             set words [_words $segs]
             if {![llength $words]} {
                 lappend zeilen ""
                 continue
             }
-            if {[_isCmdLine $words]} {
+            if {$::n2md::tip700::cApi} {
+                lappend zeilen [_cLine $segs]
+                if {"strong" in [lmap x $segs {lindex $x 0}]} { set befehl 1 }
+            } elseif {[_isCmdLine $words]} {
                 lappend zeilen [_synLine $words]
                 set befehl 1
             } elseif {![regexp {[[:alnum:]]} [join [lmap w $words {lindex $w 0}] ""]]} {
@@ -499,6 +601,8 @@ proc n2md::tip700::transform {ir} {
 }
 
 proc n2md::tip700::render {nroffText ir} {
+    set ::n2md::tip700::cApi [regexp -line \
+        {^\.TH\s+(?:"[^"]*"|\S+)\s+"?3} $nroffText]
     set body [docir::md::render [transform $ir] {headingShift 0 opDbStrong 1}]
     return "[_head $nroffText $ir]$body"
 }

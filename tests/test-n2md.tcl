@@ -178,6 +178,55 @@ test "tip700: .OP mit fetten Datenbanknamen" {
     test::assertContains $m "**-command** (**command**/**Command**)\n: Specifies." ".OP"
 }
 
+# C-Schnittstelle (.3)
+proc md3 {nroff} {
+    set nroff ".TH Tcl_Alloc 3 9.0 Tcl \"Tcl Library Procedures\"\n$nroff"
+    return [n2md::tip700::render $nroff [docir::roff::fromAst [nroffparser::parse $nroff]]]
+}
+
+test "tip700: .AP mit Typ, Name und Richtung (.3)" {
+    set m [md3 ".SH ARGUMENTS\n.AS Tcl_Interp *interp in\n.AP size_t size in\nSize in bytes.\n.AP \"const char\" *path out\nPath.\n.AP int code\nCode.\n.AE\n"]
+    test::assertContains $m "size_t *size* (in)\n: Size in bytes." "einfaches .AP"
+    test::assertContains $m "const char *\\*path* (out)\n: Path." "Typ in Anfuehrungszeichen"
+    test::assertContains $m "int *code*\n: Code." "ohne Richtung"
+}
+
+test "tip700: C-Uebersicht als Spans (.3)" {
+    set m [md3 ".SH SYNOPSIS\n.nf\n\\fB#include <tcl.h>\\fR\n.sp\nvoid *\n\\fBTcl_Realloc\\fR(\\fIptr, size\\fR)\n.sp\nint\n\\fBTk_PhotoPutBlock\\fR(\\fIinterp, x,\\\ny\\fR)\n.fi\n.SH DESCRIPTION\nText.\n"]
+    test::assertContains $m {[#include]{.cmd} [\<tcl.h>]{.lit}} "include"
+    test::assertContains $m "void \\*\n\[Tcl_Realloc\]{.cmd}(\[ptr\]{.arg}, \[size\]{.arg})" "Prototyp"
+    test::assertContains $m {[Tk_PhotoPutBlock]{.cmd}([interp]{.arg}, [x]{.arg}, [y]{.arg})} "Fortsetzungszeile"
+}
+
+test "n2md: Schriftmakros .B .I .BR .BI (expect.man)" {
+    set m [md ".SH DESCRIPTION\n.B Expect\nreads\n.I cmdfile\nand\n.BR Tk 's\nshell.\n.TP\n.BI close \" \[-i id\]\"\ncloses.\n"]
+    test::assertContains $m "**Expect** reads *cmdfile* and **Tk**'s shell." ".B .I .BR"
+    test::assertContains $m "**close** *\\\[-i id\\\]*" ".BI als Begriff"
+}
+
+test "n2md: .I ohne Argument gilt fuer die naechste Zeile" {
+    set m [md ".SH DESCRIPTION\nSee\n.I\nExploring Expect\nby Don.\n"]
+    test::assertContains $m "See *Exploring Expect* by Don." ".I allein"
+}
+
+test "n2md: .B im .nf-Block (libexpect.man)" {
+    set m [md ".SH DESCRIPTION\n.nf\n.B int fd;\n.fi\n"]
+    assert [expr {[string first ".B" $m] < 0}] "kein Makro im Code"
+    test::assertContains $m "int fd;" "Text bleibt"
+}
+
+test "n2md: \\&\\fR allein ist kein Text (tdom)" {
+    set m [md ".SH DESCRIPTION\n.TP\n\\&\\fBdom\\fP\n\\&\\fR\n.RS\n.PP\nCreates.\n.RE\n"]
+    assert [expr {[string first "\\&" $m] < 0}] "kein \\& in der Ausgabe"
+}
+
+test "tip700: C-Seite, alles fett, Fliesstext in SYNOPSIS (libexpect.man)" {
+    set m [md3 ".SH SYNOPSIS\nThe\n.B exp_x\nfunction.\n.SH SYNOPSIS\n.nf\n.B int\n.B exp_spawnv(file,argv);\n.B extern void (*exp_cb)();\n.fi\n"]
+    test::assertContains $m "The **exp_x** function." "Fliesstext bleibt Text"
+    test::assertContains $m "int\n\[exp_spawnv\]{.cmd}(file,argv);" "nur der Name ist .cmd"
+    test::assertContains $m "extern void (\\*exp_cb)();" "Funktionszeiger ohne .cmd"
+}
+
 # ------------------------------------------------------------
 # Kommandozeile
 # ------------------------------------------------------------

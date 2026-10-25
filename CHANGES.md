@@ -1,5 +1,53 @@
 # man-viewer — Changelog
 
+## 2026-10-24 — n2md: C API pages (.3)
+
+Measured on Tcl/Tk 8.6.18 and 9.0.5, itcl and tdbc (397 `.3` pages): all
+converted, all 2371 `.AP` entries in the output with type, name and
+direction, every bold function name of the synopsis as `.cmd`.
+
+- nroffparser: `.AP type name ?in|out|in/out? ?indent?` becomes a list
+  item of kind `ap` with the term `type \fIname\fR (in)`; the text up to
+  the next `.AP` is its description. Type and name may be quoted
+  (`"const char" *path`). Before, `.AP` was skipped: types, names and
+  directions were lost and the descriptions ran into one paragraph. All
+  docir renderers already handled kind `ap` (md, html, pdf, svg as a
+  definition list, Tk and roff like `.TP`). tdom `expatapi.n` uses `.AP`
+  too.
+- n2md --tip700: for section 3 (`.TH x 3`) the synopsis is converted
+  segment by segment: `[Tcl_Realloc]{.cmd}([ptr]{.arg}, [size]{.arg})`,
+  `[#include]{.cmd} [\<tcl.h>]{.lit}`, return types as text. Before,
+  "\fBTcl_Realloc\fR(\fIptr, size\fR)" became
+  `[Tcl_Realloc(ptr,]{.cmd} [size)]{.arg}`. A `\` at the end of a
+  synopsis line (continuation, FindPhoto.3) joins the lines.
+- nroffparser: the man font macros `.B .I .R .BI .IB .BR .RB .IR .RI .SB
+  .SM`, in text and inside `.nf`. Tcl/Tk never uses them, Expect does
+  (709 times): ".B Expect reads .I cmdfile" ran into the text as is.
+  Without an argument (`.I` alone) the font applies to the next text
+  line.
+- nroffparser: a line of escapes only (`\&\fR`, after every `.TP` term in
+  tdom) became the raw text `\\&\\fR`. `parseInlines` now falls back to
+  the raw text only if it has no backslash.
+- n2md --tip700, section 3: in the synopsis only `.nf` blocks are
+  prototypes; running text with bold words stays text (libexpect.man has
+  a SYNOPSIS of prose). A line that is bold throughout (old style:
+  `.B exp_spawnv(file,argv);`) marks only the name before `(` as `.cmd`,
+  not a function pointer `(*name)()`.
+- `tests/test-n2md.tcl`: seven tests for `.AP`, the C synopsis, the font
+  macros and `\&\fR`.
+
+- `tools/nroff2md.tcl` rebuilt (`build-nroff2md.tcl --check`: current);
+  same output as `bin/n2md --tip700` on the samples.
+- `tools/build-nroff2md-bin.tcl` (new): builds `tools/nroff2md.bin`, a
+  Tcl 9 tclsh with `nroff2md.tcl` attached as a zipfs image
+  (`zipfs mkimg`). `--template EXE` takes a static tclsh for a binary
+  without libtcl; default is the running tclsh. Same output as
+  `nroff2md.tcl`, also with `--batch`.
+
+Checked by converting every nroff page in tcltk-manual-de `src/` (1432:
+Tcl/Tk, tcllib, tklib, extensions) before and after: only the `.3` pages,
+eight tdom pages and the two Expect pages changed.
+
 ## 2026-10-24 — test runner, blank test, n2md finds docir
 
 From the bookkit review of 2026-10-24 (T01, T02).
