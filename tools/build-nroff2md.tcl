@@ -7,16 +7,17 @@
 #   EMBEDDED: nroffparser-0.2.tm       nroff-Parser           (man-viewer)
 #   EMBEDDED: docir-0.1.1.tm           DocIR-Kern             (docir)
 #   EMBEDDED: docir/roffSource-0.1.tm  AST -> DocIR           (docir)
-#   EMBEDDED: docir/md-0.1.tm          DocIR -> Markdown      (docir)
-#   EMBEDDED: n2md/tip700-0.1.tm       TIP-700-Markdown       (man-viewer)
+#   EMBEDDED: docir/md-0.2.tm          DocIR -> Markdown      (docir)
+#   EMBEDDED: n2md/tip700-0.2.tm       TIP-700-Markdown       (man-viewer)
 #   nroff2md-main.tcl                  CLI-Argument-Handling
 #
 # Bis 2026-10-21 bettete es ast2md-0.1.tm ein, das seit dem Umbau auf
 # DocIR (Mai 2026) geloescht ist -- nroff2md.tcl liess sich nicht mehr
 # bauen und blieb auf dem Stand vom Maerz.
 #
-# Die "package provide"-Zeilen bleiben stehen: tip700 ruft
-# "package require docir::md", roffSource "package require docir".
+# Die "package provide"-Zeilen bleiben stehen: roffSource ruft
+# "package require docir". tip700 0.2 braucht docir nicht mehr (eigener
+# Parser, 2026-10-26).
 #
 # Usage:
 #   tclsh tools/build-nroff2md.tcl ?--docir DIR? ?--check?
@@ -55,8 +56,8 @@ set modules [list \
     [list $libDir   nroffparser-0.2.tm] \
     [list $docirDir docir-0.1.1.tm] \
     [list $docirDir docir/roffSource-0.1.tm] \
-    [list $docirDir docir/md-0.1.tm] \
-    [list $libDir   n2md/tip700-0.1.tm]]
+    [list $docirDir docir/md-0.2.tm] \
+    [list $libDir   n2md/tip700-0.2.tm]]
 
 # -- Hilfsproc: Modul-Inhalt für Einbettung aufbereiten --
 proc embedModule {path name} {

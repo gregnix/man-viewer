@@ -75,7 +75,7 @@ man-viewer/
 │   ├── docir-loader.tcl        # Finds the docir repo, sources modules directly
 │   └── tm/
 │       ├── nroffparser-0.2.tm  # nroff → AST
-│       ├── nroffrenderer-0.1.tm# AST → Tk text widget (for app display)
+│       ├── nroffrenderer-0.2.tm# AST → Tk text widget (for app display)
 │       ├── mvconfig-0.1.tm     # Configuration
 │       ├── mvdebug-0.2.tm      # Debug toolkit
 │       └── mvmanindex-0.1.tm   # Manpage index
@@ -86,7 +86,7 @@ man-viewer/
 │   ├── parser-0.2-notes.md     # Parser implementation notes
 │   ├── renderer-spec.md        # AST renderer spec
 │   └── user-guide.md           # User guide
-└── tests/                      # 67 tests passing
+└── tests/                      # run-all-tests.tcl
 ```
 
 **Note:** The DocIR spec lives in the docir repo at
@@ -101,7 +101,7 @@ All load the docir repo via the loader:
 ```bash
 n2html input.n output.html [--theme manpage|default|none] [--lang DE]
                             [--link-mode local|anchor|online] [--toc]
-n2md   input.n output.md       [--tip700] [--batch DIR OUT]
+n2md   input.n output.md       [--tip700] [--batch DIR OUT [--groups]]
 n2pdf  input.n output.pdf  [--paper a4|letter]
 n2svg  input.n output.svg
 n2txt  input.n output.txt    # does NOT use DocIR (direct AST→text)
@@ -157,8 +157,9 @@ cd tests
 tclsh run-all-tests.tcl
 ```
 
-Current status: **67 tests passing** (only non-DocIR-specific tests;
-DocIR tests run in the docir repo, where 728 tests pass).
+Current status: **302 checks passing** under Tcl 8.6 and 9.0 with Tk
+(`run-all-tests.tcl` counts assertions; without a display the Tk tests are
+skipped). DocIR has its own suite in the docir repo.
 
 ---
 

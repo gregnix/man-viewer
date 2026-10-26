@@ -7,10 +7,10 @@ proc usage {} {
     puts "Options:"
     puts "  --tip700             TIP-700 format as man2markdown.tcl: YAML head,"
     puts "                       ::: {.synopsis} ::: with spans, SEE ALSO and"
-    puts "                       KEYWORDS in the head"
+    puts "                       KEYWORDS in the head, links to other pages"
     puts "  --linkmode MODE      Link mode: none, server, file (not with --tip700)"
     puts "  -lang LANG           accepted, ignored (code blocks have no language)"
-    puts "  --batch DIR OUT      Convert all .n/.3 files in DIR to OUT/"
+    puts "  --batch DIR OUT      Convert all .n/.1/.3 files in DIR to OUT/"
     puts "  --no-index           Skip index.md generation in batch mode"
     puts "  --help               Show this help"
     puts ""
@@ -46,15 +46,17 @@ proc convertFile {inputFile outputFile lang linkmode {indexLink ""} {tip700 fals
         set sourceFile $inputFile
     }
 
+    # TIP 700: eigener Parser in n2md::tip700 0.2 (Links ueber die Seiten
+    # im Ordner der Eingabedatei); das DocIR braucht es nur fuer index.md
     if {[catch {
         set ast [nroffparser::parse $nroff $sourceFile]
         set ir  [docir::roff::fromAst $ast]
         if {$tip700} {
-            set md [n2md::tip700::render $nroff $ir]
+            set md [n2md::tip700::convert $nroff -file $sourceFile]
         } else {
             set md [docir::md::render $ir [list linkResolve [list linkTarget $linkmode]]]
+            set md [n2md::tip700::uriLinks $md]
         }
-        set md [n2md::tip700::uriLinks $md]
     } err]} {
         puts stderr "Error converting $inputFile: $err"
         return {0 {}}
@@ -176,10 +178,10 @@ proc generateIndex {entries outputDir linkmode} {
     puts stderr "Index:   $indexFile ([llength $entries] entries)"
 }
 
-# findNroffFiles -- findet .n und .3 Dateien rekursiv
+# findNroffFiles -- findet .n, .1 und .3 Dateien rekursiv
 proc findNroffFiles {dir} {
     set files {}
-    foreach pattern {*.n *.3} {
+    foreach pattern {*.n *.1 *.3} {
         lappend files {*}[glob -nocomplain -directory $dir $pattern]
     }
     foreach subdir [glob -nocomplain -directory $dir -type d *] {
@@ -191,7 +193,7 @@ proc findNroffFiles {dir} {
 proc batchConvert {inputDir outputDir lang linkmode noIndex {tip700 false}} {
     set files [findNroffFiles $inputDir]
     if {[llength $files] == 0} {
-        puts stderr "No .n or .3 files found in $inputDir (recursive)"
+        puts stderr "No .n, .1 or .3 files found in $inputDir (recursive)"
         return 0
     }
     file mkdir $outputDir

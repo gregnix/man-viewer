@@ -362,4 +362,4 @@ if {[file exists $_n2txtPath]} {
     }
 }
 
-test::runAll
+exit [test::runAll]

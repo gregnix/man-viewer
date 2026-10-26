@@ -8,7 +8,7 @@ die DocIR-Pipeline aus dem [docir-Repo](../../../docir/).
 | Tool     | Output    | DocIR-Senke         | Spezielle Optionen                        |
 |----------|-----------|---------------------|-------------------------------------------|
 | `n2html` | HTML      | `docir::html`        | `--theme`, `--lang`, `--link-mode`, `--toc` |
-| `n2md`   | Markdown  | `docir::md`          | `--tip700`, `--batch DIR OUT`             |
+| `n2md`   | Markdown  | `docir::md`          | `--tip700`, `--batch DIR OUT`, `--groups` |
 | `n2pdf`  | PDF       | `docir::pdf`         | `--paper a4|letter` (braucht pdf4tcl)     |
 | `n2svg`  | SVG       | `docir::svg`         | (foreignObject-Modus default)             |
 | `n2txt`  | Plain text| **keine** (direkt AST) | minimaler Debug-/Plain-Renderer        |
@@ -71,30 +71,40 @@ Definitionslisten (`Begriff` / `: Beschreibung`, immer ab Spalte 0).
 
 ```bash
 n2md --tip700 after.n after.md
-n2md --batch doc/ md/ --tip700
+n2md --batch doc/ md/ --tip700 --groups
 ```
 
-`--tip700` schreibt das Format von `man2markdown.tcl` (TIP 700), wie es
-tcltk-manual-de fuer en-markdown/de-markdown benutzt (Modul
-`lib/tm/n2md/tip700-0.1.tm`):
+`--tip700` schreibt das Format von `man2markdown.tcl` (TIP 700, Zweig
+tip-700, Stand 2026-10-25) mit eigenem Parser (Modul
+`lib/tm/n2md/tip700-0.2.tm`), ohne dessen Abbrueche auf unbereinigtem
+nroff (8.6, 9.0, tcllib, tklib):
 
-- YAML-Kopf `CommandName`, `ManualSection`, `Version`, `TclPart`,
-  `TclDescription` (aus `.TH`), `Links` (SEE ALSO), `Keywords`
-  (KEYWORDS), `Copyright` (Kommentarzeilen); SEE ALSO und KEYWORDS
-  stehen nicht mehr im Text
-- `# Name`, `# Synopsis`, `## Unterabschnitt` (erster Buchstabe gross)
+- YAML-Kopf `CommandName`, `title`, `ManualSection`, `Version`,
+  `TclPart`, `TclDescription` (aus `.TH`), `Links` (SEE ALSO),
+  `Keywords` (KEYWORDS), `Copyright` (Kommentarzeilen mit "Copyright")
+- Ueberschriften `# Name`, `## Unterabschnitt`; Woerter in
+  Grossbuchstaben bekommen die Schreibweise aus dem Text der Seite
+  (`TCL_DSTRING` -> `Tcl\_DString`, `API` bleibt)
 - Uebersicht als `::: {.synopsis} :::` mit Spans `.cmd` `.sub` `.lit`
-  `.ins` `.arg` `.optarg` `.optlit` `.optdot`
-- Absaetze zwischen `.VS`/`.VE` als `::: {.info -version="..."}`
-- `.OP` als `**-opt** (**dbName**/**dbClass**)`, zwei Begriffe mit
-  einer Beschreibung: `: ...see next...`
+  `.ins` `.arg` `.optarg` `.optlit` `.optdot`; Abschnitt 3:
+  `[int]{.ret} [Tcl\_X]{.ccmd} [a, b]{.cargs}`, `.AP` als
+  `::: {.arguments} :::` mit `[\*interp]{.carg .in type="Tcl_Interp"}`
+- Definitionslisten: Begriff mit `.\" METHOD:`/`OPTION:`/`COMMAND:`
+  davor als Spans, sonst `**...**`; weitere Absaetze, Code und Listen
+  (`.IP (1)` -> `1.`) unter `.RS` 4 Leerzeichen eingerueckt
+- `.VS`/`.VE` als `[...]{version="TIP..."}`
+- Befehle im Text als Referenzlinks (`[cd]`, `[string match][string]`),
+  Linkziele am Ende (`[cd]: cd.md`, `[wish]: ../Tk/wish.md`). Welche
+  Woerter Befehle sind, steht in den Seiten des Ordners der Eingabe
+  (Uebersicht, NAME; C-Funktionen aus NAME der `.3`-Seiten), dazu feste
+  Tabellen aus man2markdown fuer Tcl/Tk. `--groups` (mit `--batch`)
+  schreibt wie man2markdown in `Tcl/`, `TclCAPI/`, `Tk/`, `TkCAPI/`;
+  die Pfade `../TclCAPI/...` der Links setzen das voraus.
 
-Gemessen an Tcl 9.0.5 und Tk 9.0 (231 Seiten): alle Seiten
-umgewandelt (man2markdown: 213, Rest per pandoc). Auf den 213 Seiten
-gleicher YAML-Kopf bei 211, gleiche Uebersicht bei 182 (Rest:
-man2markdown verliert Woerter wie `-server`, `readable`, `image`),
-gleiche Ueberschriften bei 211; 141 von 292 497 Woertern fehlen, fast
-alle sind `\(bu`/`\(34`/`\(en`, die man2markdown roh stehen laesst.
+Gemessen an der Ausgabe von man2markdown (Tcl 9.1/Tk 9.0, 398 Seiten):
+97,5 % gleiche Zeilen, 193 Seiten gleich (0.1: 72,4 %, keine). Die
+seitenbezogenen Textkorrekturen von man2markdown (`mdExceptions`)
+werden nicht nachgebildet.
 
 Exit-Status 1, wenn eine Seite nicht umgewandelt werden konnte.
 

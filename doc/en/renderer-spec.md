@@ -70,7 +70,7 @@ The renderer creates the following Tk text tags:
 ```tcl
 package require Tk
 source nroffparser-0.1.tm
-source nroffrenderer-0.1.tm
+source nroffrenderer-0.2.tm
 
 # Create text widget
 text .t -wrap word -width 80 -height 30

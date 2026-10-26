@@ -5,4 +5,4 @@ package ifneeded mvconfig                         0.1      [list source -encodin
 package ifneeded mvdebug                          0.2      [list source -encoding utf-8 [file join $dir mvdebug-0.2.tm]]
 package ifneeded mvmanindex                       0.1      [list source -encoding utf-8 [file join $dir mvmanindex-0.1.tm]]
 package ifneeded nroffparser                      0.2      [list source -encoding utf-8 [file join $dir nroffparser-0.2.tm]]
-package ifneeded nroffrenderer                    0.1      [list source -encoding utf-8 [file join $dir nroffrenderer-0.1.tm]]
+package ifneeded nroffrenderer                    0.2      [list source -encoding utf-8 [file join $dir nroffrenderer-0.2.tm]]

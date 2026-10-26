@@ -3,7 +3,7 @@
 # Version: 0.3 (DocIR hub architecture)
 # Based on Richard Suchenwirth's original viewer (2004)
 # Enhanced with better nroff macro support and improved UX
-# Refactored to use nroffparser-0.2 and nroffrenderer-0.1
+# Refactored to use nroffparser-0.2 and nroffrenderer-0.2
 
 package require Tcl 8.6-
 package require Tk 8.6-
@@ -48,7 +48,7 @@ if {[catch {package require mvdebug 0.2} err]} {
     puts stderr "Warning: mvdebug nicht ladbar: $err"
 }
 package require nroffparser 0.2
-package require nroffrenderer 0.1
+package require nroffrenderer 0.2
 package require mvmanindex 0.1
 package require mvconfig 0.1
 
@@ -1479,7 +1479,7 @@ proc loadManPage {file} {
 
 # Old loadManPage implementation removed
 # The old implementation used line-by-line parsing with macro handlers
-# Now replaced with nroffparser-0.2 and nroffrenderer-0.1
+# Now replaced with nroffparser-0.2 and nroffrenderer-0.2
 # Old code preserved in git history if needed
 
 # ============================================================

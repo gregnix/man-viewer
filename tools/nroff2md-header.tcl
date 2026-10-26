@@ -6,7 +6,8 @@
 # Source:   https://github.com/gregnix/man-viewer
 #
 # Same pipeline as man-viewer/bin/n2md, in one file, without installed
-# modules: nroff -> nroffparser (AST) -> docir::roff (DocIR) -> docir::md.
+# modules: nroff -> nroffparser (AST) -> docir::roff (DocIR) -> docir::md;
+# with --tip700 n2md::tip700 (own parser, format of man2markdown.tcl).
 #
 # Embedded modules (built by tools/build-nroff2md.tcl, do not edit here):
 #   mvdebug-0.2          -- debug/trace toolkit      (man-viewer)
@@ -14,7 +15,7 @@
 #   docir-0.1.1          -- DocIR core               (docir)
 #   docir::roffSource    -- AST -> DocIR             (docir)
 #   docir::md            -- DocIR -> Markdown        (docir)
-#   n2md::tip700         -- TIP-700 Markdown         (man-viewer)
+#   n2md::tip700 0.2     -- TIP-700 Markdown         (man-viewer)
 #
 # Copyright (c) 2026 Gregor Ebbing <gregnix@github>
 # All rights reserved.

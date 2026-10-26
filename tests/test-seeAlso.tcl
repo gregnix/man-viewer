@@ -130,7 +130,7 @@ test "seeAlso.html.anchor" {
 }
 
 # ============================================================
-test::runAll
+exit [test::runAll]
 
 # ============================================================
 # Tests: listStack (RS/RE Verschachtelung)
@@ -182,7 +182,7 @@ test "listStack.unclosed_RS" {
     assert [expr {[llength $lists] >= 1}] "Mindestens 1 Liste trotz unclosed RS"
 }
 # ============================================================
-test::runAll
+exit [test::runAll]
 
 # ============================================================
 # Tests: .UR/.UE URL-Links
@@ -262,4 +262,4 @@ test "ur.docir_mapper_href" {
     assertEqual "https://www.tcl.tk" [dict get $link href] "href im DocIR"
 }
 # ============================================================
-test::runAll
+exit [test::runAll]

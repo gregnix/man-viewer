@@ -61,7 +61,7 @@ rename _paths_addRepo {}
 
 package require mvdebug      0.2
 package require nroffparser  0.2
-package require nroffrenderer 0.1
+package require nroffrenderer 0.2
 
 # Shared-Config (~/.tcldocs.rc) -- gemeinsame Theme/Font-Settings
 # zwischen mdhelp und nroffide. Seit 2026-05-13 als externes Modul

@@ -1,5 +1,295 @@
 # man-viewer — Changelog
 
+## 2026-10-26 — nroffrenderer 0.2: Tcl 9; tests end their process
+
+From the review of 2026-10-26 (run under Tcl 9.0.4: 9 of 9 parity tests red).
+
+- `lib/tm/nroffrenderer-0.2.tm` (replaces 0.1): the link colour is set as
+  `::nroffrenderer::currentLinkFg`. The relative name inside the namespace
+  meant a child namespace that Tcl 9 does not create ("parent namespace
+  doesn't exist"); every render in the old Tk renderer failed under 9.0.
+  `app/man-viewer.tcl`, `app/nroffide.tcl`, `tests/test-setup.tcl`:
+  `package require nroffrenderer 0.2`.
+- `test-renderer-parity.tcl`, `test-blank-consumers.tcl`,
+  `test-debug-scope.tcl`, `test-seeAlso.tcl` end with `exit [test::runAll]`:
+  with Tk loaded the process stayed in the event loop after the last test
+  and the runner waited.
+- README: test count is 203 (`run-all-tests.tcl`, Tcl 8.6 and 9.0, Tk).
+
+## 2026-10-26 — n2md --tip700: format of the official man2markdown.tcl
+
+`tools/man2markdown.tcl` (Tcl core, branch tip-700, 2026-10-25) now
+writes a different format, and it aborts (`exit`) on 10-25 % of the
+uncleaned 8.6/9.0 pages. n2md writes the same format by general rules,
+without aborting. Measured against its output (Tcl 9.1, Tk 9.0, 398
+pages): 97.5 % equal lines, 193 pages identical (0.1: 72.4 %, none).
+
+- `lib/tm/n2md/tip700-0.2.tm` (new, replaces 0.1): own block and inline
+  parser after man2markdown (no docir any more). `title:` in the head;
+  only comment lines starting with "Copyright"; definition terms with a
+  `.\" METHOD:`/`OPTION:`/`COMMAND:` comment as spans; further
+  paragraphs, code and lists of an item (`.RS`/`.RE`, `.IP (1)` -> `1.`)
+  indented 4 spaces; `.VS`/`.VE` as `[...]{version="..."}`; section 3:
+  `[int]{.ret} [Tcl\_X]{.ccmd} [a, b]{.cargs}` and `::: {.arguments} :::`
+  with `[\*interp]{.carg .in type="Tcl_Interp"}`; markdown escapes
+  `* \ _ [ ]` (`Tcl\_Obj`); heading words in capitals take the spelling
+  from the page text (`Tcl\_DString`, `DDE and Tcl`).
+- Links: commands as reference links (`[cd]`, `[string match][string]`,
+  `[Tcl\_GetInt][GetInt]`, sections `[Name resolution]`), targets at the
+  end (`[cd]: cd.md`, `../Tk/wish.md`, `../TclCAPI/...`). Which words are
+  commands comes from the pages in the input folder (synopsis, NAME;
+  C functions from NAME of the `.3` pages) and fixed tables taken from
+  man2markdown (C function -> page, Tk command -> page, return codes,
+  exclusions), not from `[info commands]`. The page-specific text fixes
+  of man2markdown (`mdExceptions`) are not copied.
+- Unlike man2markdown: `.RS`/`.RE` count their depth, a comment belongs
+  to the `.TP` below it (also inside `.RS`), an open `.VS` region runs
+  into a following list, `Tk_` functions are `.ccmd` like `Tcl_`, words
+  of two option groups (`?+??script?`, bind.n) are split, `.SO`/`.SE`
+  and `.OP` become a section and definition list instead of raw text.
+- `bin/n2md`: `--batch` also converts `.1` (tclsh.1, wish.1);
+  `--groups` writes into `Tcl/`, `TclCAPI/`, `Tk/`, `TkCAPI/` like
+  man2markdown (the `../TclCAPI/x.md` links assume this layout).
+- `tools/nroff2md.tcl` and `tools/nroff2md.bin` rebuilt with tip700 0.2;
+  `tools/build-nroff2md.tcl` embeds `docir/md-0.2.tm` (docir 2026-10-26,
+  `md-0.1.tm` is gone there).
+- `.IP tag word`: a second word that is no indent (`(20)` in AddOption.3,
+  `and \fBTCL_ENCODING_END\fR` in Encoding.3) stays part of the term; it
+  was dropped as the indent.
+- Links from the fixed tables (taken from Tcl/Tk 9.1) only when the target
+  page exists in the input folder, if that folder holds the target's group:
+  9.0 has no `timer.n`, 8.6 no `link.n`, `const.n`, `callback.n` (5 dead
+  links in the 8.6/9.0 manuals before).
+- `.DS`/`.DE` (tables with `.ta`, bind.n): one line per nroff line with a
+  hard break (`\`) instead of one long line; inside a definition the
+  `::: {.info DISPLAY="yes"}` div is indented and opened as well as closed
+  (man2markdown wrote only the closing `:::`). No trailing spaces.
+- `tests/test-n2md.tcl`: TIP-700 tests changed to the new format, 13 new
+  ones (spans in terms, indentation, depth, links, index, escapes, no
+  abort on dirty nroff). `run-all-tests.tcl` with Tk (xvfb): 203 green under
+  Tcl 8.6 and 9.0 (196 before; the runner counts assertions, not test
+  cases).
+
+Checked by converting Tcl/Tk 8.6.18 and 9.0.5, tcllib and tklib with
+`--tip700` (1367 pages before, 1371 now with `.1`): no failures.
+
+Second round (same day, still 0.2): errors found while moving the German
+9.0 pages to the new format. General rules, no page exceptions; several
+of these were behaviour of man2markdown that n2md had copied and now
+does better (marked "official").
+
+- An option line alone (`.br`/`.PP` + `\fB\-opt\fP \fIarg\fP`) followed
+  by `.RS ... .RE` is a definition: `**-opt** *arg*` / `: text` (Styling
+  options of ttk_notebook, ttk_combobox, ttk_spinbox, ttk_button,
+  ttk_entry, ttk_progressbar, ttk_style, ttk_treeview). Before, text and
+  the next option ran into one paragraph (official).
+- `.RS` and `.RE` end a paragraph (nroff breaks the line there; exec.n
+  "**Argument quoting**" no longer runs into the next sentence), except
+  when the paragraph holds only an open `.VS`.
+- Two `.SO` sections in a row (ttk_spinbox.n: ttk_widget, ttk_entry) give
+  one "Standard options" heading.
+- A list term without `METHOD:`/`COMMAND:` comment whose first word is
+  the command of the commented term before or above it is a command term
+  as well (spans): "after cancel script ...", "interp alias ... {}",
+  "zlib stream compress", photo "imageName transparency get" (official:
+  bold text). Inner lists do not change the command of the outer list.
+- Synopsis/terms: `?x y?` after a subcommand (`?\fIx\fR` with one letter)
+  is `.optarg` (ttk_scale.n); further bold words after `.ins .sub` are
+  `.lit` (`\fIpathName \fBscan mark\fR`); a group in braces over several
+  words is one `.arg` (`[{keyVariable valueVariable}]{.arg}` in array.n,
+  dict.n, switch.n, open.n, link.n; photo.n `[-format]{.lit}
+  [{format-name ?option value ...?}]{.arg}` instead of the split
+  `[{format-name]{.sub}`); `\|` and `\^` are dropped (dde.n `[--]` instead
+  of `[-|-]`); nested `?-frame ?bool??` (interp.n); several bold words in
+  `?...?` are `.optlit` (wm.n); punctuation after the font end stays
+  outside the span (listbox.n `[y]{.arg}.`); `?options? value` no longer
+  one span (switch.n, uplevel.n).
+- Fonts: a space right after `\fB`/`\fI` moves out (`their\fB destroy\fR`
+  -> `their **destroy**`, canvas.n, singleton.n, photo.n `* imageName*`,
+  SetAppName.3); an empty font (`\fBmax \fIarg\fB \fR...`,
+  `\fBconcat\fI \fR?`) is dropped instead of leaving "f" (mathfunc.n,
+  8.6 concat.n).
+- Escapes: `\.` is a dot (getOpenFile.n `**\\.c**`); groff character
+  names `\(r!` `\(ct` `\(ss` ... (Latin-1, `\(eu`, `\(mi`, `\(ul`,
+  `\(bv`, `\(br`) become characters (keysyms.n had 88 raw escapes,
+  CrtItemType.3 `\(mi`). A line starting with `'` that is no request
+  (`' (apostrophe) 39 0x27`, keysyms.n) is text; nroff would drop it,
+  the source should write `\&'`.
+- `.PP` directly followed by `.RS` (also with `.VS` between) after a list
+  item belongs to the item, indented as its definition: expr.n "A
+  **numeric value**" got its text instead of "see below ...", msgcat.n,
+  open.n "Windows", http.n, tclvars.n, photo.n svg (official: paragraphs
+  outside the list).
+- Numbered lists start with the number of the source: `.IP [3]` after a
+  paragraph is "3." (msgcat.n, tcltest.n); further items count on
+  (TkInitStubs.3 has "2)" twice).
+- `.VS "9.0, TIP262"` before a list keeps the whole value
+  (toplevel.n, frame.n had `version="9.0,"`).
+- Links: a bold phrase of several words that is a heading of the page is
+  a section link before a command link ("see section **callback
+  invocation**" -> `[Callback invocation]`, not `[...][callback]`, msgcat.n;
+  not for the page's own command, binary.n "**binary format**"); a
+  heading followed by "section of the **exec** command" is no link to the
+  own page (open.n; Encoding.3); a bold value between two non-commands in
+  an enumeration is no link (vwait.n "**readable**, **timeleft**,
+  **variable**, and **writable**", entry.n `-validate` values); a bold
+  word followed by "method" is no link (singleton.n **destroy**,
+  callback.n **unknown**); no link inside a span that is the whole term
+  (wm.n `[**menu**]{version="8.6"}` instead of `[[menu]]{...}`); a link
+  followed by "(" is escaped (`[namespace]\(n)`, otherwise a link to
+  "n"); always two blank lines before the link targets (tk_mac.n had
+  four after nested lists).
+- `tests/test-n2md.tcl`: 15 new tests (Round 2), one changed ("x b"
+  after a METHOD term is now a command term).
+  `run-all-tests.tcl`: 240 green under Tcl 8.6 and 9.0 (README updated).
+
+Measured against man2markdown (vergleich.py, Tcl 9.1/Tk 9.0 tip-700
+sources): 97.0 % equal lines, 177 pages identical (before this round
+97.4 %, 188). Every lost line was checked: the official output is the
+one with the error (raw `\(r!` in keysyms, glued options, `[-|-]`, bold
+terms, `[namespace](n)`, extra blank lines before the link targets).
+Tcl/Tk 8.6.18 and 9.0.5 converted again: no words lost, no dead links.
+
+Third round (same day, still 0.2): remaining errors of the English 8.6
+pages and tklib (doctools nroff). General rules, no page exceptions.
+
+- `.TH` with an unquoted name of two words (`.TH tk print n "" Tk ...`,
+  print.n, sysnotify.n, systray.n in Tk 9.0.5): the two words are the
+  name. Before, "print" was the section and the pages fell into group
+  Tcl; the index of the Tk 9.0 folder then had a group Tcl with three
+  pages, and the check "target page must exist" dropped every link from
+  Tk 9.0 pages to Tcl pages (`[after]`, `[scan]`, `TCL_OK` -> catch).
+  8.6 was not affected.
+- Links: a definition term that starts with several bold words is no
+  link (pack-old.n "**frame center**", was `[frame center][frame]`;
+  photo.n "**update region** *X0*, ...", busy.n "**tk busy** *window*"); a
+  bold word followed by "form(s)" or "widget command", also at the end
+  of an enumeration, is no link (pack-old.n "the **before**, **after**,
+  and **append** forms", canvas.n "the **focus** widget command"; "the
+  **ttk::entry** widget commands" stays a link); a bold word right after
+  an italic placeholder at the start of a line is no link (8.6 terms
+  "*pathName* **focus**", interp.n "*child* **eval**"); two bold words
+  that are a subcommand after a placeholder in a term of the page are no
+  link (canvas.n, entry.n, listbox.n, spinbox.n, text.n "**scan
+  dragto**", listbox.n "**selection anchor**"); "the **X** manual
+  page/entry" links to page X if it exists ("See the
+  [ttk\_widget][ttk_widget] manual entry" from `.SO ttk_widget` on all
+  ttk pages, chan.n refchan/transchan, load.n safe, Thread.3 Notifier).
+- Index: a name that is only in the synopsis and also appears in
+  italics on its page is a placeholder, no command (8.6 refchan.n
+  `\fBcmdPrefix \fIoption\fR`: chan.n linked "**cmdPrefix**" to
+  refchan); a command named in the synopsis of several pages but in no
+  NAME goes to the page whose file name is the command
+  (`widget::calendar` -> widget_calendar.n, not widget.n); such a
+  command in the page's own synopsis is no link to another page (tklib
+  ntextIndent.n linked its own commands to ntext.md).
+- A list item whose first block is an inner definition list gets "see
+  below ..." and the inner list indented below it; before, the first
+  inner term stood as the definition after ": " (ttk_style.n `element`,
+  `theme`; 8.6 ttk_treeview.n `tag`).
+- `.RE` ending the indented blocks of an item also ends an inner list:
+  text after it is a paragraph of the item, not part of the last inner
+  item (8.6 ttk_treeview.n "identify item" after `.RE` without `.TP`,
+  a source error; http.n "Examples", ttk_treeview.n search options with
+  their group headings "Direction", "Pattern Matching").
+- doctools (tklib, tcllib): `.IP` without a tag inside an item is a
+  further paragraph, not an item with an empty term (diagram.n "assuming
+  that ..."); a request glued to punctuation (`.IP, etc\&. is`) is the
+  request and a text line; the widget option table (`.nf` "Command-Line
+  Switch:" / "Database Name:" / "Database Class:" `.fi`, ctext.n,
+  ipentry.n, widgetPlus.n) is an `.OP` term; `.sp` inside an item starts
+  a paragraph ([para] in lists, ntextIndent.n; Tcl clock.n examples;
+  man2markdown ignores `.sp`, at top level it still does); a list in an
+  item whose items all have no text, or a list of several such items, is
+  a bullet list of the terms instead of "see below ..." with nothing
+  below (ico.n options, menubar.n).
+- Synopsis: words without font right after the command are `.lit`
+  (doctools `\fB$widget\fR topic \fIcommand\fR`, chatwidget.n,
+  plotchart.n); several bold words after the command are `.lit` each,
+  ended by a brace group or italics (`\fBdataCmd\fR \fBmove start\fR`,
+  canvas_epoints.n; dict.n `[script]{.lit} [{keyVariable
+  valueVariable}]{.arg}`; if.n `[elseif]{.lit} ...`).
+- Headings: common abbreviations (API, URL, UTF, HTTP, ...) stay upper
+  case when the text of the page gives no other form (tklib `.SH API`,
+  "CLASS API": was "Api", "Class api").
+- `tests/test-n2md.tcl`: 13 new tests (Round 3), one changed (ttk_spinbox
+  "See the [ttk\_entry][ttk_entry] manual entry"). `run-all-tests.tcl`:
+  280 green under Tcl 8.6 and 9.0.
+
+Source errors, left as they are: 8.6 zlib.n has `.` instead of `.TP`
+before "stream header" (fixed in 9.0); 8.6 ttk_treeview.n has no `.TP`
+before "identify item" (fixed in 9.0); tklib history.n `[call bell]`,
+getstring.n options as plain lines, diagram.n `\fB\fBn\fRth\fR`.
+ttk_treeview.n "Tag priority ..." after the TAG OPTIONS list is a
+paragraph of the section in the source (correct as is).
+
+vergleich.py: 97.0 % equal lines (47245 of 48714, before 47253), 175
+pages identical (before 177). The lost lines are the new links "See the
+[safe] manual entry" (load.n, loadTk.n), "[Notifier] manual page"
+(Thread.3), "[refchan]"/"[transchan]" (chan.n), "[library]" (tclvars.n),
+the canvas widget subcommands without link (BindTable.3), the term
+"**tk busy**" without link on its own page (busy.n), and clock.n
+examples as paragraphs; man2markdown has no link, a link to the page that
+defines the term, or one long paragraph there.
+
+Fourth round (same day, still 0.2): tcllib (447 doctools pages) converted
+with 0.2 for the first time; errors found there. General rules, no page
+exceptions; Tcl/Tk 8.6/9.0 pages unchanged except chan.n and busy.n (see
+below), tklib: 44 pages (blank lines at the end of code, empty items).
+
+- Synopsis: an option without font in an optional group
+  (`?-format \fIformat\fR?`, crc16.n, graph.n, htmlparse.n, comm.n) is
+  `[[-format]{.lit} [format]{.arg}]{.optarg}` like `?\fB-format\fR ...?`,
+  also nested (`?-key \fIkey\fR ?-value \fIvalue\fR??`); before
+  `?-format [format?]{.arg}`. `\fI?x?\fR` is `.optarg` (cron.n, was
+  `[?x?]{.arg}`); `?\fIkey\fR \fIvalue\fR?...` and `?\fIwindow \fR?...` are
+  `.optdot` (uri.n; chan.n, busy.n: `[optionName value]{.optdot}`, as
+  man2markdown writes it, was `[optionName value?...]{.optarg}`); parentheses
+  around alternatives are split off without spaces (`(\fIlocal\fR | -data
+  \fIdata\fR)`, `(?\fIoptions\fR? \fIfile\fR)...`, ftp.n, fileutil.n, mime.n:
+  `([local]{.arg} | ...)`, was `[chan)]{.arg}`; `value(s)` stays one word);
+  `package require \fBTcl ?8.5 9?\fR` gives `[8.5 9]{.optlit}` (mapproj.n).
+- Code blocks drop blank lines at the end (doctools writes one before
+  `.CE`; 1484 blocks in tcllib, 109 in tklib).
+- Adjacent runs of the same font are one run (`\fIe1\fR\fIe2\fR`:
+  `*e1e2*`, was `*e1**e2*`, pt_peg_introduction.n, peg.n, graphops.n).
+- Empty items at the end of a definition list that is followed by a
+  heading, the end of the item or a paragraph only in bold (doctools
+  `[para][emph Methods]`) get no "see below ..." (nothing follows them):
+  a bullet list after the list (httpd.n, practcl.n undocumented methods;
+  pt_introduction.n `pt::pgen` alone before the next heading; tklib
+  chatwidget.n, widget_calendar.n). Before a paragraph a single empty item
+  keeps "see below ..." (nsimage.n).
+- Headings: "I" stays upper case (snitfaq.n "Can I ...", was "Can i").
+- `.SH KEYWORDS` / `.SH "SEE ALSO"` holding lists or paragraphs (tool.n:
+  the keywords of `tool::define` as `.TP` items) are ordinary sections;
+  only a word list goes into the head. Before, the whole section became
+  keywords in the head. `.SH ARGUMENTS` without `.AP` is an ordinary
+  section (tepam_doc_gen.n, mapproj.n: the `.TP` list ran into one
+  paragraph).
+- Links: a bold word right after `**$object**` at the start of a line is a
+  method, no link (traverse.n "**$traverser** **files**" linked multiop);
+  "a method named **import text**" is no link (pt_peg_container.n,
+  toc_container.n, idx_container.n).
+- SYNOPSIS: text lines that are not a synopsis line are separate
+  paragraphs where `.sp`/`.PP`/`.br` separates them (doctools clay.n,
+  tool.n, practcl.n, httpd.n, pie.n, widget_toolbar.n: every `proc
+  \fBname\fR ...` line was glued into one paragraph); C API pages with
+  prototype rests after the synopsis (CrtAlias.3, Encoding.3, ...) are
+  split the same way.
+- `tests/test-n2md.tcl`: 8 new tests (Round 4). `run-all-tests.tcl`: 302
+  green under Tcl 8.6 and 9.0 (README updated).
+
+Source errors in tcllib, left as they are: fumagic/cfront.n synopsis and
+term `?\fIcompressed\fR` / `\fBboolean\fR? --` broken over two lines;
+struct/matrix.n `??\fIreport\fR? \fIchannel\fR?`; grammar_aycock/aycock.n
+and math/romberg.n have two `.SH DESCRIPTION`; struct/struct_set.n empty
+`.SH REFERENCES`; doctools writes `\fIstruct :: set\fR` as category.
+
+vergleich.py: unchanged (97.0 %, 175 pages identical). Words: no loss
+against the 0.1 pages except "...see next..." which is now "see below
+..." or a bullet list; no dead links (tcllib 108 targets).
+
 ## 2026-10-24 — n2md: C API pages (.3)
 
 Measured on Tcl/Tk 8.6.18 and 9.0.5, itcl and tdbc (397 `.3` pages): all

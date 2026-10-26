@@ -138,4 +138,4 @@ test "parity.rs_re_indent" {
 }
 
 # ============================================================
-test::runAll
+exit [test::runAll]

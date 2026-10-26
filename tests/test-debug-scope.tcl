@@ -77,4 +77,4 @@ test "scope.parse_produces_ast" {
 }
 
 # ============================================================
-test::runAll
+exit [test::runAll]

@@ -36,7 +36,7 @@ rename _paths_addRepo {}
 
 # Module via package require laden
 package require nroffparser 0.2
-package require nroffrenderer 0.1
+package require nroffrenderer 0.2
 catch {package require mvdebug 0.2}
 
 # DocIR-Pipeline (optional — viele Tests brauchen sie nicht)

@@ -1,4 +1,10 @@
-# nroffrenderer-0.1.tm
+# nroffrenderer-0.2.tm
+#
+# 0.2 (2026-10-26): the link colour goes to ::nroffrenderer::currentLinkFg
+#   with its full name. "set nroffrenderer::currentLinkFg" inside the
+#   namespace looked for a child namespace nroffrenderer::nroffrenderer;
+#   Tcl 9 does not create it ("parent namespace doesn't exist"), every
+#   render failed there (test-renderer-parity.tcl, 9 of 9).
 #
 # Tk renderer for nroffparser AST
 #
@@ -14,7 +20,7 @@
 # Version: 0.1
 # Author: Based on AST-Spec and man-viewer.tcl patterns
 
-package provide nroffrenderer 0.1
+package provide nroffrenderer 0.2
 
 # Load debug module if available
 if {[catch {package require mvdebug}]} {
@@ -73,9 +79,9 @@ proc nroffrenderer::render {ast textWidget {options {}}} {
     }
     # Aktualisiere Namespace-Variable für renderNode
     if {[dict exists $colors linkFg]} {
-        set nroffrenderer::currentLinkFg [dict get $colors linkFg]
+        set ::nroffrenderer::currentLinkFg [dict get $colors linkFg]
     } else {
-        set nroffrenderer::currentLinkFg "#0066cc"
+        set ::nroffrenderer::currentLinkFg "#0066cc"
     }
     
     debug::startTimer "render"
@@ -582,7 +588,7 @@ proc nroffrenderer::renderInlines {textWidget inlines {defaultTag normal}} {
                 set linkSection [dict get $inline section]
 
                 $textWidget tag configure $tagName \
-                    -foreground $nroffrenderer::currentLinkFg \
+                    -foreground $::nroffrenderer::currentLinkFg \
                     -underline 1
                 $textWidget insert end $text $tagName
 
