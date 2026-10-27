@@ -198,9 +198,15 @@ BSD 2-Clause — see [LICENSE](LICENSE).
 
 ## Background
 
-This project was motivated by
-[TIP 700](https://core.tcl-lang.org/tips/doc/trunk/tip/700.md),
-which proposes replacing nroff with Markdown for Tcl/Tk manpages.
+man-viewer started as a Tk GUI for reading man pages, not only those of
+Tcl/Tk. `n2md --tip700` writes the Markdown format of
+[TIP 700](https://core.tcl-lang.org/tips/doc/trunk/tip/700.md), which
+proposes replacing nroff with Markdown for Tcl/Tk manpages, so that pages
+from other sources (Tcl/Tk 8.6, tcllib, tklib, extensions) can use a
+TIP 700-oriented format. The Tcl sources also provide `man2markdown.tcl`
+for converting core manual pages. `n2md` is a complementary, separately
+developed converter, not a replacement for `man2markdown.tcl`; identical
+output in every case is not claimed.
 
 In the course of development, the DocIR hub architecture emerged as a
 generalisation of the conversion pipelines. DocIR was extracted into its
