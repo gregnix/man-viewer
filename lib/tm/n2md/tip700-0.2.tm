@@ -743,7 +743,10 @@ proc n2md::tip700::_prep {text} {
         # "'" als Steuerzeichen (ausser Kommentar): nicht Text. Folgt kein
         # Anweisungsname, ist es Text (keysyms.n im Code: "' (apostrophe)
         # 39 0x27"; nroff verschluckt die Zeile, gemeint ist sie als Text)
-        if {[string index $line 0] eq "'" && [regexp {^'\s*[A-Za-z]} $line]} continue
+        # Ein Name aus mehr als drei Zeichen oder mit Satzzeichen dahinter
+        # ist keine Anweisung ("'ftp://', 'http://' and ...", tclvfs
+        # vfslib.n): Text wie bei keysyms.n
+        if {[string index $line 0] eq "'" && [regexp {^'\s*[A-Za-z]{1,3}(\s|$)} $line]} continue
         # Inline-Kommentar \" am Zeilenende
         if {[string first \\\" $line] >= 0} {
             regsub {(^|[^\\])\\".*$} $line {\1} line
@@ -758,6 +761,11 @@ proc n2md::tip700::_prep {text} {
             set line [string map {\\f1 \\fR \\f2 \\fI \\f3 \\fB \\f(CW \\fB \\f(CB \\fB \\f(CI \\fI \\f[] \\fR \\f[B] \\fB \\f[I] \\fI \\f[R] \\fR \\fC \\fB} $line]
         }
         # Schriftmakros .B .I .BR ...
+        # ".I" allein vor ".TP" (expect.man vor "close"): die Absatzmakros
+        # setzen die Schrift zurueck, sie gilt nicht der Definition
+        if {$nextFont ne "" && [regexp {^\.(TP|IP|HP|PP|LP|P|SH|SS)(\s|$)} $line]} {
+            set nextFont ""
+        }
         if {[regexp {^\.(B|I|R|BI|IB|BR|RB|IR|RI|SB|SM)(\s.*)?$} $line -> m rest]} {
             set t [_fontMacro .$m $rest]
             if {$t eq ""} { set nextFont [string index $m 0]; continue }
@@ -776,7 +784,41 @@ proc n2md::tip700::_prep {text} {
         # ueber zwei Zeilen)
         lappend out $line
     }
-    return [_optTables $out]
+    return [_optTables [_urBlocks $out]]
+}
+
+# man(7) ".UR url" Text ".UE": der Text "<URL: url>" (tdom schema.n, dom.n,
+# expat.n) oder leer wird "[url]" (daraus macht uriLinks "<url>"), sonst
+# Text und " [url]". Vorher standen "<URL: <url>>" und ein leerer Absatz.
+proc n2md::tip700::_urBlocks {lines} {
+    if {[lsearch -regexp $lines {^\.UR(\s|$)}] < 0} { return $lines }
+    set out {}
+    set n [llength $lines]
+    for {set k 0} {$k < $n} {incr k} {
+        set l [lindex $lines $k]
+        if {[regexp {^\.UR\s+(.*)$} $l -> a]} {
+            set url [lindex [_args $a] 0]
+            set j [expr {$k + 1}]
+            set txt {}
+            while {$j < $n && ![regexp {^\.UE(\s|$)} [lindex $lines $j]] && [_macro [lindex $lines $j]] eq ""} {
+                lappend txt [lindex $lines $j]
+                incr j
+            }
+            if {$url ne "" && $j < $n && [regexp {^\.UE\s*(.*)$} [lindex $lines $j] -> punkt]} {
+                set punkt [string trim [lindex [_args $punkt] 0]]
+                set tt [string trim [join $txt " "]]
+                if {$tt eq "" || $tt eq "<URL: $url>" || $tt eq $url} {
+                    lappend out "\[$url\]$punkt"
+                } else {
+                    lappend out "$tt \[$url\]$punkt"
+                }
+                set k $j
+                continue
+            }
+        }
+        lappend out $l
+    }
+    return $out
 }
 
 # doctools schreibt Widget-Optionen als Tabelle (ctext.n, ipentry.n,
@@ -784,8 +826,13 @@ proc n2md::tip700::_prep {text} {
 #   .LP / .nf / .ta 6c / Command-Line Switch:<Tab>\fB-x\fR /
 #   Database Name:<Tab>\fBx\fR / Database Class:<Tab>\fBX\fR / / .fi / .IP
 # Daraus ".OP -x x X" wie in den Tk-Seiten: Begriff und Definition
+#
+# [incr Tk] (itk Archetype.n, Toplevel.n, Widget.n) schreibt dieselbe Tabelle
+# als "Name:" / "Class:" / "Command-Line Switch:" (wie die alten Tk-Seiten
+# vor .OP); ohne "Command-Line Switch:" ist es eine Komponente ("Name: hull",
+# "Class: Toplevel"): Begriff "\fBhull\fR (\fBToplevel\fR)"
 proc n2md::tip700::_optTables {lines} {
-    if {[lsearch -regexp $lines {^Command-Line Switch:}] < 0} { return $lines }
+    if {[lsearch -regexp $lines {^(Command-Line Switch|Name):}] < 0} { return $lines }
     set out {}
     set n [llength $lines]
     for {set k 0} {$k < $n} {incr k} {
@@ -793,19 +840,28 @@ proc n2md::tip700::_optTables {lines} {
         if {$l eq ".nf"} {
             set j [expr {$k + 1}]
             if {[string match .ta* [lindex $lines $j]]} { incr j }
-            set vals {}
-            foreach key {{Command-Line Switch} {Database Name} {Database Class}} {
-                if {[regexp "^$key:\\s*(.*)\$" [lindex $lines $j] -> v]} {
-                    lappend vals [string trim [_strip $v]]
-                    incr j
-                }
+            set vals [dict create]
+            while {$j < $n && [regexp {^(Command-Line Switch|Database Name|Database Class|Name|Class):\s*(.*)$} \
+                    [lindex $lines $j] -> key v]} {
+                dict set vals $key [string trim [_strip $v]]
+                incr j
             }
             while {$j < $n && [string trim [lindex $lines $j]] eq ""} { incr j }
-            if {[llength $vals] == 3 && [lindex $vals 0] ne "" && [lindex $lines $j] eq ".fi"} {
+            set sw [_d $vals {Command-Line Switch}]
+            set dn [_d $vals {Database Name} [_d $vals Name]]
+            set dc [_d $vals {Database Class} [_d $vals Class]]
+            set ok [expr {[lindex $lines $j] eq ".fi" && [dict size $vals] >= 2}]
+            if {$ok && $sw ne "" && [dict size $vals] == 3} {
                 # .LP/.PP davor gehoert zur Tabelle
                 if {[lindex $out end] in {.LP .PP}} { set out [lrange $out 0 end-1] }
-                lassign $vals sw dn dc
                 lappend out ".OP \"$sw\" \"$dn\" \"$dc\""
+                set k $j
+                continue
+            }
+            if {$ok && $sw eq "" && [dict size $vals] == 2 && [dict exists $vals Name]
+                    && [dict exists $vals Class] && $dn ne "" && $dc ne ""} {
+                if {[lindex $out end] in {.LP .PP}} { set out [lrange $out 0 end-1] }
+                lappend out .TP "\\fB$dn\\fR (\\fB$dc\\fR)"
                 set k $j
                 continue
             }
@@ -926,6 +982,11 @@ proc n2md::tip700::_birp {text} {
                         if {$lb eq " "} {
                             set out [string range $out 0 end-1]
                             append out \\fR " "
+                        } elseif {$lb2 eq " ?"} {
+                            # "\fI* ?\fBto" (itcldelegate.n): "?" gehoert
+                            # vor das fette Wort wie bei "\fB x ?\fI"
+                            set out [string range $out 0 end-2]
+                            append out \\fR " ?"
                         } else {
                             append out \\fR
                         }
@@ -1092,6 +1153,8 @@ proc n2md::tip700::_command {line {ver ""} {cApi 0}} {
     # Abstaende ohne Zeichen (\| \^ \& \%): "\-\|\-" ist "--" (dde.n)
     set line [string map {\\| {} \\^ {} \\& {} \\% {}} $line]
     set line [string map {\\ {}} $line]
+    # Leerzeichen am Ende ("\fBf\fP (\fIa\fR)  ", tdom expatapi.n)
+    set line [string trim $line]
     set B $mB; set I $mI; set R $mR
 
     # Abschnitt 3: "#typ <B>name<R>(args)" bzw. "typedef typ <B>name<R>(args)"
@@ -1114,15 +1177,17 @@ proc n2md::tip700::_command {line {ver ""} {cApi 0}} {
             set l0 [string trim [string range $line 0 [expr {$s - 1}]]]
         }
         set p [string first ( $line $s]
-        set l1 [string range $line $s [expr {$p - 1}]]
+        # Leerzeichen vor "(" (tdom expatapi.n: "\fBf\fP (\fIa\fR)")
+        set l1 [string trim [string range $line $s [expr {$p - 1}]]]
         set l2 [string range $line [expr {$p + 1}] end-1]
         # nur ein Bezeichner vor "(" ist eine Funktion
         if {[regexp "^$B?\[A-Za-z_\]\[A-Za-z0-9_:\]*$R?\$" [string trim $l1]]} {
             set words [expr {$l0 eq "" ? [list $l1 $l2] : [list $l0 $l1 $l2]}]
             return [_cmdWords $words $va 1]
         }
-    } elseif {[string index $line 0] eq $B && [string index $line 1] eq "#"} {
-        # "#include <tcl.h>"
+    } elseif {([string index $line 0] eq $B && [string index $line 1] eq "#")
+            || ($cApi && [regexp {^#include\s} $line])} {
+        # "#include <tcl.h>" (auch ohne Schrift, tdom expatapi.n)
         return [list [list Strong {} [list [list Text {} [string trim [_unmark $line]]]]]]
     }
     if {$cApi && [string index $line 0] eq "#"} {
@@ -1182,7 +1247,11 @@ proc n2md::tip700::_command {line {ver ""} {cApi 0}} {
         }
         lappend merged $w
     }
-    return [_cmdWords $merged $va 0]
+    # Befehl ohne Schrift am Anfang, danach Schrift (tdom: "domDocObjCmd
+    # \fImethod\fR ...", "::dom::xpathFunc::\fIfuncName\fR ..."): .cmd
+    set plain [expr {!$cApi && [string first $B [lindex $merged 0]] < 0 && [string first $I [lindex $merged 0]] < 0
+        && [regexp "\[$B$I\]" [join [lrange $merged 1 end]]]}]
+    return [_cmdWords $merged $va 0 $plain]
 }
 
 # Zeichenkette fuer einen regulaeren Ausdruck schuetzen
@@ -1203,7 +1272,7 @@ proc n2md::tip700::_isBraceGroup {w} {
 }
 
 # Woerter -> Spans (Kern von parseCommand)
-proc n2md::tip700::_cmdWords {words va cfun} {
+proc n2md::tip700::_cmdWords {words va cfun {plainCmd 0}} {
     variable mB; variable mI; variable mR
     set B $mB; set I $mI; set R $mR
     set out {}
@@ -1212,6 +1281,14 @@ proc n2md::tip700::_cmdWords {words va cfun} {
     set i 0
     while {$i < $n} {
         set w [lindex $words $i]
+        if {$i == 0 && [string index $w 0] eq $B && [regexp "$R\[$B$I\]" $w]
+                && [regexp {^[A-Za-z_:][A-Za-z0-9_:]*$} [_unmark $w]]} {
+            # Befehl aus mehreren Schriften ohne Leerzeichen
+            # ("\fBtdbc::\fIdriver\fB::connection create", tdbc.n): ein
+            # fettes Wort
+            set ende [expr {[string index $w end] eq $R ? $R : ""}]
+            set w "$B[_unmark $w]$ende"
+        }
         if {$i == 0} {
             if {[regexp "^$B-.+$R\$" $w]} {
                 lappend out [_sp .lit [string range $w 1 end-1]]
@@ -1242,11 +1319,17 @@ proc n2md::tip700::_cmdWords {words va cfun} {
                     set w [lindex $words $i]
                     set t [expr {$k == 1 ? ".sub" : ".lit"}]
                     incr k
+                    set u [_unmark $w]
+                    # "\fBpackage require vfs ?1.4?\fR" (vfs.n): optional
+                    if {[regexp {^\?([^?]+)\?$} $u -> inner]} {
+                        set t .optlit
+                        set u $inner
+                    }
                     if {[string index $w end] eq $R} {
-                        lappend out {Space {} {}} [_sp $t [_unmark $w]]
+                        lappend out {Space {} {}} [_sp $t $u]
                         break
                     }
-                    lappend out {Space {} {}} [_sp $t [_unmark $w]]
+                    lappend out {Space {} {}} [_sp $t $u]
                 }
             } elseif {[regexp "^$I.+$R\$" $w]} {
                 # Instanz als Befehl (pathName cget)
@@ -1272,11 +1355,25 @@ proc n2md::tip700::_cmdWords {words va cfun} {
                 incr n -1
                 continue
             } elseif {[regexp "^$I" $w]} {
-                # kursiv ohne Ende im Wort: ".ins" bis zum Ende
+                # kursiv ohne Ende im Wort: ".ins", die weiteren kursiven
+                # Woerter bis zum Ende ".arg" ("\fIclassName objName\fR",
+                # itcl class.n)
                 lappend out [_sp .ins [_unmark $w]]
+                while {$i + 1 < $n} {
+                    set nw [lindex $words [expr {$i + 1}]]
+                    if {[regexp "^\[?$B$I\x15\x16\]" $nw]} break
+                    incr i
+                    lappend out {Space {} {}} [_sp .arg [_unmark $nw]]
+                    if {[string index $nw end] eq $R} break
+                }
             } else {
-                # nicht erkannt (man2markdown: exit): Text
-                lappend out [list Text {} [_unmark $w]]
+                if {$plainCmd && [regexp {^[$:A-Za-z_][$:A-Za-z0-9_]*$} $w]} {
+                    lappend out [_sp [concat .cmd $va] $w]
+                    set cmdType cmd
+                } else {
+                    # nicht erkannt (man2markdown: exit): Text
+                    lappend out [list Text {} [_unmark $w]]
+                }
             }
             incr i
             continue
@@ -1300,8 +1397,63 @@ proc n2md::tip700::_cmdWords {words va cfun} {
                 && [string index [lindex $words [expr {$i + 1}]] 0] eq $I} {
             set w "?$B$opt$R"
         }
-        # Klammergruppe {a b ...}: ein Argument
-        if {[_isBraceGroup $w]} {
+        if {([regexp "^\\?\[^?$B$I$R\]+\$" $w] || [regexp "^$I\\?\[^?$R\]+\$" $w])
+                && $i + 1 < $n} {
+            # optionale Gruppe ueber mehrere Woerter ohne Schrift ("?-lock
+            # mutex?", "?arg ...?", "?key value..?", thread.n, tsv.n) oder
+            # ganz kursiv mit den Fragezeichen ("\fI?optionName value ...?\fR",
+            # udp.n): Option + Wert als [[-o]{.lit} [w]{.arg}]{.optarg},
+            # "..." am Ende als .optdot
+            set kursiv [expr {[string index $w 0] eq $I}]
+            set ws [list [string range [_unmark $w] 1 end]]
+            set zu 0
+            while {$i + 1 < $n} {
+                set nw [lindex $words [expr {$i + 1}]]
+                set u [_unmark $nw]
+                if {!$kursiv && [regexp "\[$B$I\]" $nw]} break
+                incr i
+                if {[string index $u end] eq "?"} {
+                    lappend ws [string range $u 0 end-1]
+                    set zu 1
+                    break
+                }
+                lappend ws $u
+                if {[string index $nw end] eq $R} break
+            }
+            # "..." als eigenes Wort: .optdot; am Wort ("value...") bleibt es
+            # im Text wie bei man2markdown ("?\fIx\fR...?" -> [x...]{.optarg})
+            set dots 0
+            set last [lindex $ws end]
+            if {[regexp {^\.{2,3}$} $last]} {
+                set ws [lrange $ws 0 end-1]
+                set dots 1
+            }
+            if {!$zu} {
+                # kein schliessendes "?": Text wie bisher
+                lappend out {Space {} {}} [list Text {} "?[join $ws " "]"]
+            } elseif {$dots} {
+                lappend out {Space {} {}} [_sp .optdot [join $ws " "]]
+            } elseif {!$kursiv && [llength $ws] == 2 && [string index [lindex $ws 0] 0] eq "-"} {
+                lappend out {Space {} {}} [list Span .optarg [list [_sp .lit [lindex $ws 0]] \
+                    {Space {} {}} [_sp .arg [lindex $ws 1]]]]
+            } else {
+                lappend out {Space {} {}} [_sp .optarg [join $ws " "]]
+            }
+        } elseif {[regexp "^\\?(\\?\[$B\]\[^?\]*\\?)\$" $w -> innen] && $i + 1 < $n} {
+            # innere Gruppe am Anfang einer Gruppe ("[ [ -[f|b] ] cmdfile ]",
+            # expect.man): [[-[f|b]]{.optlit} [cmdfile]{.arg}]{.optarg}
+            set sub [list [_sp .optlit [string range [_unmark $innen] 1 end-1]]]
+            while {$i + 1 < $n} {
+                incr i
+                set u [_unmark [lindex $words $i]]
+                set zu [expr {[string index $u end] eq "?"}]
+                set u [string trimright $u ?]
+                if {$u ne ""} { lappend sub {Space {} {}} [_sp .arg $u] }
+                if {$zu} break
+            }
+            lappend out {Space {} {}} [list Span .optarg $sub]
+        } elseif {[_isBraceGroup $w]} {
+            # Klammergruppe {a b ...}: ein Argument
             lappend out {Space {} {}} [_sp .arg [_unmark $w]]
         } elseif {[regexp "^\\?$I.+ \\.\\.\\.$R\\?\$" $w]} {
             lappend out {Space {} {}} [_sp .optdot [_unmark [string range $w 2 end-5]]]
@@ -1376,6 +1528,13 @@ proc n2md::tip700::_cmdWords {words va cfun} {
                 } elseif {[string range $w 0 2] eq "..."} {
                     set gt .optdot
                     break
+                } elseif {[lindex $sub end 1] eq ".arg" && ![regexp "\[$B$I$R\]" $w]
+                        && [regexp {^[A-Za-z_][A-Za-z0-9_]*\??$} $w]} {
+                    # Wort ohne Schrift nach einem kursiven ohne Ende: noch
+                    # kursiv ("?\fBexcept \fImethodName methodName ...\fR?",
+                    # itcldelegate.n)
+                    lappend sub {Space {} {}} [_sp .arg [string trimright $w ?]]
+                    if {[string index $w end] eq "?"} break
                 } else {
                     # anderes Muster in der Gruppe (man2markdown: Fehler)
                     set t [string trimright [_unmark $w] ?]
@@ -1520,14 +1679,24 @@ proc n2md::tip700::_blocks {lines {top 0}} {
                 if {$m in {.TP .IP .OP}} { set pendingVs $tv }
             }
             if {[string trim [regsub -all "$VS\[^:\]*:|$VE" $content ""]] ne ""} {
+                # Absatz nur aus eingerueckten Zeilen (Fuellmodus: jede bricht
+                # die Zeile; expect.man "    #!/usr/local/bin/expect \-f"
+                # zwischen Leerzeilen): vorformatiert
+                if {$type eq "Paragraph" && ![llength $attrs] && $indented
+                        && [llength $plist] && ![string match *$VS* $content]} {
+                    set type Code
+                    set content [join $plist \n]
+                }
                 lappend blocks [list $type $attrs $content]
             }
         } else {
             set pendingVs ""
         }
-        set type ""; set content ""; set attrs {}; set plines 0
+        set type ""; set content ""; set attrs {}; set plines 0; set plist {}; set indented 1
     }
     set plines 0
+    set plist {}
+    set indented 1
     while {$i < $n} {
         set line [lindex $lines $i]
         set m [_macro $line]
@@ -1643,6 +1812,7 @@ proc n2md::tip700::_blocks {lines {top 0}} {
             }
             .QW - .PQ - .QR {
                 if {$type eq ""} { set type Paragraph }
+                set indented 0
                 if {$type eq "Code"} {
                     set t [string map [list $::n2md::tip700::Q ""] [_quoting $line]]
                     append content [expr {$content eq "" ? "" : "\n"}] $t
@@ -1653,6 +1823,7 @@ proc n2md::tip700::_blocks {lines {top 0}} {
             }
             .MT {
                 if {$type eq ""} { set type Paragraph }
+                set indented 0
                 append content [expr {$content eq "" ? "" : " "}] {""}
                 incr i
             }
@@ -1674,8 +1845,15 @@ proc n2md::tip700::_blocks {lines {top 0}} {
             }
             .DS {
                 if {$type ne ""} { eval $close; continue }
-                set type Paragraph
-                set attrs {DISPLAY yes}
+                if {[_d $P noTa 0]} {
+                    # Seite ohne .ta (tclhttpd httpd.1: Beispiele mit .DS):
+                    # vorformatiert, keine Tabelle
+                    set type Code
+                    set attrs {nf 1}
+                } else {
+                    set type Paragraph
+                    set attrs {DISPLAY yes}
+                }
                 incr i
             }
             .SO {
@@ -1694,6 +1872,7 @@ proc n2md::tip700::_blocks {lines {top 0}} {
             }
             .UL {
                 if {$type eq ""} { set type Paragraph }
+                set indented 0
                 set a [_macroArgs $line]
                 append content [expr {$content eq "" ? "" : " "}] "\\fI[lindex $a 0]\\fR[lindex $a 1]"
                 incr i
@@ -1707,7 +1886,30 @@ proc n2md::tip700::_blocks {lines {top 0}} {
                     incr i
                     continue
                 }
+                # Leerzeile im Fliesstext: nroff bricht und laesst eine Zeile
+                # frei, ein neuer Absatz (expect.man, libexpect.man, itcl);
+                # man2markdown klebt die Absaetze zusammen
+                if {[string trim $line] eq "" && $type eq "Paragraph"
+                        && ![llength $attrs]} {
+                    if {[string trim [regsub -all "$VS\[^:\]*:|$VE" $content ""]] ne ""} {
+                        # offene .VS-Region gilt auch fuer den naechsten Absatz
+                        # (encoding.n: Profile tcl8/replace in .VS TIP656)
+                        set wieder $vsOpen
+                        eval $close
+                        if {$wieder} {
+                            set type Paragraph
+                            set content "$VS$vsInfo:"
+                            set vsOpen 1
+                        }
+                    }
+                    incr i
+                    continue
+                }
                 incr plines
+                if {$type eq "Paragraph"} {
+                    lappend plist $line
+                    if {![regexp {^[ \t]+\S} $line]} { set indented 0 }
+                }
                 if {$content eq ""} {
                     set content $line
                 } else {
@@ -1862,7 +2064,9 @@ proc n2md::tip700::_section {lines i} {
         for {set k $i} {$k < $n} {incr k} {
             set m [_macro [lindex $lines $k]]
             if {$m in {.SH .SS}} break
-            if {$m in {.TP .IP .PP .LP .P .RS .CS .nf .DS .OP .AP}} {
+            # .br/.sp: Zeilen statt Wortliste (expect.man: Buecher und
+            # Aufsaetze je Zeile)
+            if {$m in {.TP .IP .PP .LP .P .RS .CS .nf .DS .OP .AP .br .sp}} {
                 set key ""
                 break
             }
@@ -1993,18 +2197,79 @@ proc n2md::tip700::_synopsis {lines i title} {
             }
         }
     }
+    # man(7)-Stil (expect.man): "[" und "]" je auf einer Zeile um optionale
+    # Teile, die Zeilen ohne .br sind eine Befehlszeile (Fuellmodus). Die
+    # Zeilen bis zum naechsten Bruch werden eine Zeile mit "?...?"; die
+    # uebrigen bleiben als ".ft" stehen (Zeilenzahl bleibt fuer i)
+    if {!$cApi && [lsearch -regexp [lrange $lines $i [expr {[_sectionEnd $lines $i] - 1}]] {^\s*[\[\]]\s*$}] >= 0} {
+        set e [_sectionEnd $lines $i]
+        set k $i
+        while {$k < $e} {
+            set grp {}
+            set k0 -1
+            while {$k < $e && [_macro [lindex $lines $k]] ni {.br .sp .PP .LP .P .nf .fi}} {
+                if {[_macro [lindex $lines $k]] eq ""} {
+                    lappend grp [string trim [lindex $lines $k]]
+                    if {$k0 < 0} { set k0 $k } else { lset lines $k .ft }
+                }
+                incr k
+            }
+            if {$k0 >= 0} {
+                set s ""
+                set offen 0
+                foreach x $grp {
+                    if {$x eq "\["} {
+                        append s [expr {$offen || $s eq "" ? "" : " "}] "?"
+                        set offen 1
+                    } elseif {$x eq "\]"} {
+                        append s "?"
+                    } else {
+                        append s [expr {$offen || $s eq "" ? "" : " "}] $x
+                        set offen 0
+                    }
+                }
+                lset lines $k0 $s
+            }
+            incr k
+        }
+    }
     set inNf 0
     while {$i < $n} {
         set l [lindex $lines $i]
         set m [_macro $l]
         if {$m in {.SH}} break
         incr i
+        if {$m eq ".nf" && $cApi && ([string trim $prosa] ne "" || [llength $prosaAbs])} {
+            # .nf nach dem Text (libexpect.man: Deklarationen nach "...
+            # Expect distribution."): Codeblock zwischen den Absaetzen
+            if {[string trim $prosa] ne ""} {
+                lappend prosaAbs [list Paragraph [string trim $prosa]]
+                set prosa ""
+            }
+            set code {}
+            while {$i < $n && [_macro [lindex $lines $i]] ni {.fi .SH}} {
+                if {[_macro [lindex $lines $i]] eq ""} { lappend code [lindex $lines $i] }
+                incr i
+            }
+            if {[_macro [lindex $lines $i]] eq ".fi"} { incr i }
+            # Leerzeilen am Anfang und Ende weg
+            while {[llength $code] && [string trim [lindex $code 0]] eq ""} { set code [lrange $code 1 end] }
+            while {[llength $code] && [string trim [lindex $code end]] eq ""} { set code [lrange $code 0 end-1] }
+            if {[llength $code]} { lappend prosaAbs [list Code [join $code \n]] }
+            continue
+        }
         if {$m eq ".nf"} { set inNf 1; continue }
         if {$m eq ".fi"} { set inNf 0; continue }
         # (ausserhalb .nf doch ein Prototyp: Sleep.3 hat ".fi" statt ".sp")
         if {$cApi && (!$hasNf || !$inNf)
                 && !($hasNf && [regexp {^\\fB[A-Za-z_][A-Za-z0-9_]*\\f[RP]\(} $l])} {
-            if {$m eq ""} { append prosa " " $l } elseif {$m in {.QW .PQ .QR}} { append prosa " " [_quoting $l] }
+            if {$m eq "" && [string trim $l] eq ""} {
+                # Leerzeile im Text: neuer Absatz (libexpect.man)
+                if {[string trim $prosa] ne ""} {
+                    lappend prosaAbs [list Paragraph [string trim $prosa]]
+                    set prosa ""
+                }
+            } elseif {$m eq ""} { append prosa " " $l } elseif {$m in {.QW .PQ .QR}} { append prosa " " [_quoting $l] }
             continue
         }
         if {$m eq ".VS"} { set ver [lindex [_macroArgs $l] 0]; continue }
@@ -2023,7 +2288,7 @@ proc n2md::tip700::_synopsis {lines i title} {
         if {$m in {.sp .PP .LP .P .br} && [string trim $prosa] ne ""} {
             # Text ausserhalb der Uebersicht: .sp trennt Absaetze (doctools
             # clay.n, tool.n: "proc \fBclay::PROC\fR ..." je Zeile)
-            lappend prosaAbs [string trim $prosa]
+            lappend prosaAbs [list Paragraph [string trim $prosa]]
             set prosa ""
             continue
         }
@@ -2048,6 +2313,12 @@ proc n2md::tip700::_synopsis {lines i title} {
                 set isSyn 1
             }
         }
+        if {!$cApi && $inNf && !$isSyn && [string trim $prosa] eq "" && ![llength $prosaAbs]} {
+            # in .nf: jede Zeile eine Zeile der Uebersicht, auch ohne Schrift
+            # (tdom: "set parser [expat]", "domDocObjCmd \fImethod\fR ...");
+            # vorher klebten sie als Absatz zusammen
+            set isSyn 1
+        }
         if {!$isSyn && ![llength $syn]} {
             append prosa " " $l
             continue
@@ -2069,17 +2340,28 @@ proc n2md::tip700::_synopsis {lines i title} {
     }
     set leer 1
     foreach x $syn { if {[lindex $x 2] ne ""} { set leer 0 } }
+    # Leerzeilen am Anfang und Ende des Blocks (libexpect.man: .nf, Leerzeile)
+    while {[llength $syn] && [lindex $syn 0 2] eq ""} { set syn [lrange $syn 1 end] }
+    while {[llength $syn] && [lindex $syn end 2] eq ""} { set syn [lrange $syn 0 end-1] }
     if {!$leer} {
         lappend out [list Div .synopsis $syn]
     }
     if {[string trim $prosa] ne ""} {
-        lappend prosaAbs [string trim $prosa]
+        lappend prosaAbs [list Paragraph [string trim $prosa]]
     }
     foreach a $prosaAbs {
-        lappend out [list Paragraph {} $a]
+        lassign $a typ inhalt
+        lappend out [list $typ {} $inhalt]
     }
     lappend out {*}$nachher
     return [list $out $i]
+}
+
+# Index der naechsten .SH-Zeile ab i (oder Zeilenzahl)
+proc n2md::tip700::_sectionEnd {lines i} {
+    set n [llength $lines]
+    while {$i < $n && [_macro [lindex $lines $i]] ne ".SH"} { incr i }
+    return $i
 }
 
 # doctools: "package require \fBbase64 ?2\&.6\&.1?\fR"
@@ -2246,6 +2528,10 @@ proc n2md::tip700::_list {lines i pendingVs {top 0}} {
             set blockType List
             set lattrs {-type bullet}
         }
+    } elseif {$m eq ".TP" && [regexp {^(\\&|\s)*\\\(bu(\\&|\s)*$} [lindex $lines [expr {$i + 1}]]]} {
+        # ".TP" mit Begriff "\(bu" (expect.man): Aufzaehlung wie ".IP \(bu"
+        set blockType List
+        set lattrs {-type bullet}
     }
     set items {}
     set itemNum ""
@@ -2400,6 +2686,14 @@ proc n2md::tip700::_list {lines i pendingVs {top 0}} {
                 lappend content $line
             }
             default {
+                # Zeile nur aus Escapes gleich nach dem Begriff (tdom: ".TP",
+                # Begriff, "\&\fR", dann ".RS .PP Text"): kein Text, sonst
+                # bliebe die Definition leer und der Text stuende darunter
+                if {$depth == 0 && $haveItem && [regexp {^(\\&|\\f[BIRP]|\s)+$} $line]
+                        && ![llength [lsearch -all -inline -not -regexp $content {^\.V[SE]}]]} {
+                    incr i
+                    continue
+                }
                 lappend content $line
             }
         }
@@ -2494,14 +2788,15 @@ proc n2md::tip700::_text {s} {
         lassign $m a b
         set url [string range $s $a $b]
         # ")" am Ende nur, wenn in der URL eine "(" offen ist
-        while {[regexp {[.,;:!?)]$} $url]} {
+        while {[regexp {[.,;:!?)']$} $url]} {
             if {[string index $url end] eq ")"
                     && [regexp -all {\(} $url] >= [regexp -all {\)} $url]} break
             set url [string range $url 0 end-1]
         }
         set b [expr {$a + [string length $url] - 1}]
         append out [_esc [string range $s $pos [expr {$a - 1}]]]
-        if {$a > 0 && [string index $s [expr {$a - 1}]] eq "\["} {
+        # ohne Rechner dahinter keine URL ("'ftp://'", vfslib.n)
+        if {($a > 0 && [string index $s [expr {$a - 1}]] eq "\[") || [regexp {://$} $url]} {
             append out [_esc $url]
         } else {
             append out "<$url>"
@@ -3098,6 +3393,24 @@ proc n2md::tip700::group {text} {
     return [_group [_plain $part] [_plain $sect]]
 }
 
+# Seite (Gruppe, Dateiwurzel) ist Ziel einer der festen Tabellen
+proc n2md::tip700::_isCorePage {g root} {
+    variable corePages
+    if {![info exists corePages]} {
+        variable tclCmdFileMap
+        variable tclTopicFileMap
+        variable tkCmdFileMap
+        variable tclCApiFileMap
+        variable tkCApiFileMap
+        set corePages [dict create]
+        foreach {cg m} [list Tcl $tclCmdFileMap Tcl $tclTopicFileMap Tk $tkCmdFileMap \
+                TclCAPI $tclCApiFileMap TkCAPI $tkCApiFileMap] {
+            foreach v [dict values $m] { dict set corePages $cg $v 1 }
+        }
+    }
+    return [dict exists $corePages $g $root]
+}
+
 proc n2md::tip700::index {dir} {
     variable indexCache
     variable notCommands
@@ -3118,9 +3431,12 @@ proc n2md::tip700::index {dir} {
         lassign $th thName thSect - thPart
         set thPart [_plain $thPart]
         set thSect [_plain $thSect]
-        if {$thPart in {Tcl Tk}} { set core 1 }
         set g [_group $thPart $thSect]
         set root [file rootname [file tail $f]]
+        # Kernordner: eine Tcl/Tk-Seite, die selbst Ziel der festen Tabellen
+        # ist. Erweiterungen schreiben auch "Tcl" in .TH (tdbc, tdom), ihre
+        # Seiten stehen in keiner Tabelle; dort keine Links nach ../Tk/ usw.
+        if {$thPart in {Tcl Tk} && [_isCorePage $g $root]} { set core 1 }
         dict lappend roots $g $root
         # C-Schnittstelle: alle Namen aus NAME. Sonst die Befehle, die in der
         # Uebersicht stehen (nicht "safe" in safe.n, dessen Befehle
@@ -3209,7 +3525,13 @@ proc n2md::tip700::convert {text args} {
             set ix [dict create cmds {} core 0]
         }
     }
-    set core [expr {[dict get $ix core] || $part in {Tcl Tk}}]
+    # mit Ordnerindex entscheidet der Ordner (Erweiterungen mit "Tcl" in
+    # .TH sind kein Kern), ohne Ordner der Teil aus .TH
+    if {[dict exists $ix roots]} {
+        set core [dict get $ix core]
+    } else {
+        set core [expr {[dict get $ix core] || $part in {Tcl Tk}}]
+    }
     # Argumentnamen (.AP typ name): "*argv", "argv[]" -> argv
     set cargs {}
     foreach l $lines {
@@ -3229,7 +3551,9 @@ proc n2md::tip700::convert {text args} {
         }
     }
     set ownSyn [lindex [_pageNames $text] 2]
-    set P [dict create file $root cmdName $name section $sect part $part cargs $cargs instSubs $instSubs ownSyn $ownSyn \
+    # .DS ohne Tabulatoren (.ta) auf der ganzen Seite: vorformatiert
+    set noTa [expr {[lsearch -regexp $lines {^\.ta(\s|$)}] < 0}]
+    set P [dict create file $root cmdName $name section $sect part $part cargs $cargs instSubs $instSubs ownSyn $ownSyn noTa $noTa \
         group [_group $part $sect] index $ix core $core \
         meta {} sectionTitles {} lastComment "" lastCmdWord "" lastStdOpt "" \
         wordForms [_wordForms $lines]]

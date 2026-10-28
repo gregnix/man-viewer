@@ -157,7 +157,7 @@ cd tests
 tclsh run-all-tests.tcl
 ```
 
-Current status: **302 checks passing** under Tcl 8.6 and 9.0 with Tk
+Current status: **325 checks passing** under Tcl 8.6 and 9.0 with Tk
 (`run-all-tests.tcl` counts assertions; without a display the Tk tests are
 skipped). DocIR has its own suite in the docir repo.
 
@@ -189,6 +189,8 @@ DocIR documentation in the **docir repo**:
 - `<docir>/demo/quickstart.tcl` — runnable demo script
 
 ---
+
+Developed with the help of AI tools; the code is reviewed and tested by the author.
 
 ## License
 

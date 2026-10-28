@@ -1,5 +1,53 @@
 # man-viewer — Changelog
 
+## 2026-10-27 — n2md --tip700: extensions (still 0.2)
+
+Errors found converting the extensions (tdbc, thread, itcl, itk, tdom,
+tcltls, tclvfs, tcludp, tclhttpd, expect). General rules, no page
+exceptions.
+
+- Links: a folder is a core folder only if a Tcl/Tk page in it is a page of
+  the fixed tables; tdbc and tdom write "Tcl" in `.TH` and got links to
+  `../Tk/scale.md`, `../Tk/text.md`, `../Tk/event.md` (dead).
+- A line of escapes only after a term (`\&\fR`, tdom) gives no empty
+  definition; the text after `.RS .PP` is the definition.
+- Option table "Name:" / "Class:" / "Command-Line Switch:" (itk) is an
+  `.OP` term like the doctools table; "Name:" / "Class:" alone (component)
+  is a term `**hull** (**Toplevel**)`.
+- man(7) pages (expect.man): `.TP` with term `\(bu` is a bullet list; `.I`
+  or `.B` without argument is reset by `.TP`/`.PP`/`.SH` ...; a blank line
+  in running text ends the paragraph, an open `.VS` region goes on in the
+  next one (official: glued; also encoding.n, tclsh.1, wish.1, menu.n,
+  InitStubs.3, Alloc.3); a paragraph of indented
+  lines only is code; synopsis with `[` and `]` lines is one line with
+  optional groups; SEE ALSO with `.br` is a section, not head links.
+- `.DS` on a page without `.ta` is code (tclhttpd httpd.1). `.UR url`
+  `<URL: url>` `.UE` is `<url>` (tdom). A line starting with `'` and a
+  word of more than three letters is text (vfslib.n `'ftp://' ...`); a URL
+  without host (`ftp://'`) is no link.
+- Synopsis: groups without font (`?-lock mutex?`, `?arg ...?`, thread.n,
+  tsv.n; 8.6 lindex.n, lset.n), italic with the `?` inside
+  (`\fI?optionName value ...?\fR`, udp.n), `\fI* ?\fBto` (itcldelegate.n),
+  a command of several fonts (`\fBtdbc::\fIdriver\fB::connection`),
+  `\fIclassName objName\fR` (itcl), bold `?1.4?` in `package require`
+  (vfs.n; 8.6 http.n, platform.n). C synopsis: `#include` without font,
+  blanks before `(` and at the end (tdom expatapi.n, TclZlib.3); prose and
+  `.nf` after it in a C SYNOPSIS stay paragraphs and code (libexpect.man).
+  Every line in a `.nf` SYNOPSIS is a synopsis line, also without font
+  (tdom `set parser [expat]`; were glued into one paragraph); a command
+  without font before fonted words is `.cmd` (`domDocObjCmd \fImethod\fR`).
+- `tests/test-n2md.tcl`: 9 new tests. `run-all-tests.tcl`: 325 green under
+  Tcl 8.6 and 9.0 (README updated). `tools/nroff2md.tcl`, `nroff2md.bin`
+  rebuilt.
+
+Source errors, left as they are: libexpect.man two SYNOPSIS/DESCRIPTION
+sections, K&R declarations; itcl itclextendedclass.n/itclwidget.n
+`\fB<delegation info>\fR`; tdom schema.n "see \&." after the URL.
+
+vergleich.py: 97.0 % (47239 of 48714, before 47245), 175 pages identical;
+the 6 lines are the paragraph breaks at blank lines (encoding.n, tclsh.1,
+wish.1, InitStubs.3, ObjectType.3).
+
 ## 2026-10-26 — nroffrenderer 0.2: Tcl 9; tests end their process
 
 From the review of 2026-10-26 (run under Tcl 9.0.4: 9 of 9 parity tests red).

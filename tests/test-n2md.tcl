@@ -645,6 +645,73 @@ test "tip700 R4 tcllib: kein Link fuer Methoden (\$obj, \"method named\") (trave
     test::assertContains $m "See \[files\]\[multiop\]." "sonst Link"
 }
 
+test "tip700 Erw: Begriff mit Zeile nur aus Escapes, dann .RS .PP (tdom)" {
+    set m [md ".SH D\n.TP\n\\&\\fB\\fBtdom\\fP \\fIparserObj\\fB \\fBenable\\fP\n\\&\\fR\n.RS\n.PP\nAdds it.\n.PP\nMore.\n.RE\n" 1]
+    test::assertContains $m "**tdom** *parserObj* **enable**\n: Adds it.\n\n    More." "Text als Definition"
+}
+
+test "tip700 Erw: Optionstabelle Name/Class/Command-Line Switch und Komponente (itk)" {
+    set m [md ".SH \"WIDGET-SPECIFIC OPTIONS\"\n.LP\n.nf\nName:\t\\fBtitle\\fR\nClass:\t\\fBTitle\\fR\nCommand-Line Switch:\t\\fB-title\\fR\n.fi\n.IP\nSets the title.\n.SH COMPONENTS\n.LP\n.nf\nName:\thull\nClass:\tToplevel\n.fi\n.IP\nThe hull.\n" 1]
+    test::assertContains $m "**-title** (**title**/**Title**)\n: Sets the title." "Option als Begriff"
+    test::assertContains $m "**hull** (**Toplevel**)\n: The hull." "Komponente als Begriff"
+}
+
+test "tip700 Erw: man(7)-Seite: .TP \\(bu, .I allein, Leerzeilen, eingerueckte Zeile (expect.man)" {
+    set m [md ".SH D\nFirst line:\n\n    #!/usr/local/bin/expect \\-f\n\nOf course,\n.B Expect\nlives.\n.RS\n.TP 4\n\\(bu\nCause.\n.TP\n\\(bu\nStart.\n.RE\n.PP\nAfter.\n.I\n.TP 6\n.BI close \" \[-slave\]\"\ncloses it.\n" 1]
+    test::assertContains $m "First line:\n\n```\n    #!/usr/local/bin/expect -f\n```\n\nOf course, **Expect** lives." "Leerzeile trennt, eingerueckt = Code"
+    test::assertContains $m "- Cause.\n\n- Start." "Aufzaehlung statt Begriff mit Punkt"
+    test::assertContains $m ": closes it." ".I vor .TP gilt nicht der Definition"
+}
+
+test "tip700 Erw: Uebersicht im man(7)-Stil mit \[ \] (expect.man)" {
+    set m [md ".SH SYNOPSIS\n.B expect\n\[\n.B \\-dDinN\n\]\n\[\n.B \\-c\n.I cmds\n\]\n\[\n\[\n.BR \\- \[ f | b \]\n\]\n.I cmdfile\n\]\n\[\n.I args\n\]\n.SH D\nx\n" 1]
+    test::assertContains $m {[expect]{.cmd} [-dDinN]{.optlit} [[-c]{.lit} [cmds]{.arg}]{.optarg} [[-\[f|b\]]{.optlit} [cmdfile]{.arg}]{.optarg} [args]{.optarg}} "eine Zeile mit optionalen Gruppen"
+}
+
+test "tip700 Erw: Uebersicht: Gruppen ohne Schrift, kursive ?...?, Schriftwechsel im Befehl" {
+    set m [md ".SH SYNOPSIS\n\\fBthread::eval\\fR ?-lock mutex? \\fIarg\\fR ?arg \\&.\\&.\\&.?\n.br\n\\fBudp_conf\\fR \\fIchannel\\fR \\fI?optionName value \\&.\\&.\\&.?\\fR\n.br\n\\fBtdbc::\\fIdriver\\fB::connection create \\fIdb\\fR ?\\fI\\-option value\\fR...?\n.br\n\\fBdelegate method \\fI* ?\\fBto \\fIcomponentName\\fR? ?\\fBexcept \\fIm m ...\\fR?\n.br\n\\fBpackage require vfs ?1.4?\\fR\n.br\n\\fIclassName objName\\fR ?\\fIarg arg ...\\fR?\n.SH D\nx\n" 1]
+    test::assertContains $m {[thread::eval]{.cmd} [[-lock]{.lit} [mutex]{.arg}]{.optarg} [arg]{.arg} [arg]{.optdot}} "thread.n"
+    test::assertContains $m {[udp\_conf]{.cmd} [channel]{.arg} [optionName value]{.optdot}} "udp.n"
+    test::assertContains $m {[tdbc::driver::connection]{.cmd} [create]{.sub} [db]{.arg} [-option value...]{.optarg}} "tdbc.n (wie man2markdown)"
+    test::assertContains $m {[delegate]{.cmd} [method]{.sub} [\*]{.arg} [[to]{.lit} [componentName]{.arg}]{.optarg} [[except]{.lit} [m]{.arg} [m]{.arg}]{.optdot}} "itcldelegate.n"
+    test::assertContains $m {[package]{.cmd} [require]{.sub} [vfs]{.lit} [1.4]{.optlit}} "vfs.n"
+    test::assertContains $m {[className]{.ins} [objName]{.arg} [arg arg]{.optdot}} "itcl class.n"
+}
+
+test "tip700 Erw: C-Uebersicht ohne Schrift bei #include, Leerzeichen vor ( (tdom expatapi.n)" {
+    set m [n2md::tip700::convert ".TH x 3 1.0 tdom x\n.SH SYNOPSIS\n.nf\n#include <tclexpat.h>\n\nint \n\\&\\fBCheckExpatParserObj\\fP (\\fIinterp\\fR, \\fInameObj\\fR)  \n.fi\n.SH D\nx\n"]
+    test::assertContains $m "**#include <tclexpat.h>**" "include"
+    test::assertContains $m {[int]{.ret} [CheckExpatParserObj]{.ccmd} [interp, nameObj]{.cargs}} "Prototyp"
+}
+
+test "tip700 Erw: SEE ALSO mit .br, .DS ohne .ta, .UR/.UE, Zeile mit ' (expect.man, httpd.1, schema.n, vfslib.n)" {
+    set m [n2md::tip700::convert ".TH EXPECT 1 \"29 December 1994\"\n.SH D\nYou can treat\n'ftp://' urls as files.\n.DS\nset a {x}\n.DE\nName\n.UR \"https://w.org/x\"\n<URL: https://w.org/x>\n.UE\nok.\n.SH \"SEE ALSO\"\n.BR Tcl (3)\n.br\n.I\n\"Exploring Expect\"\n\\fRby Don Libes.\n"]
+    test::assertContains $m "treat 'ftp://' urls" "Zeile mit ' bleibt"
+    test::assertContains $m "```\nset a {x}\n```" ".DS als Code"
+    test::assertContains $m "Name <https://w.org/x> ok." "URL"
+    test::assertContains $m "# See also\n\n**Tcl**(3)\n\n*\"Exploring Expect\"* by Don Libes." "SEE ALSO als Abschnitt"
+}
+
+test "tip700 Erw: Uebersicht in .nf: Zeilen ohne Schrift, Befehl ohne Schrift (tdom tdomcmd.n, domDoc.n)" {
+    set m [md ".SH SYNOPSIS\n.nf\npackage require tdom\n\nset parser \[expat\]\n\ndomDocObjCmd \\fImethod\\fR ?\\fIarg arg ...\\fR?\n.fi\n.SH D\nx\n" 1]
+    test::assertContains $m "\nset parser \\\[expat\\\]\n" "eigene Zeile"
+    test::assertContains $m {[domDocObjCmd]{.cmd} [method]{.arg} [arg arg]{.optdot}} "Befehl ohne Schrift"
+}
+
+test "tip700 Erw: Erweiterung mit \"Tcl\" in .TH ist kein Kern (keine Links nach ../Tk/)" {
+    set dir [file join [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}] n2md-erw-[pid]]
+    file delete -force $dir
+    file mkdir $dir
+    set fh [open $dir/tdbc_connection.n w]
+    puts $fh ".TH tdbc::connection n 8.6 Tcl \"Tcl Database Connectivity\"\n.SH NAME\ntdbc::connection \\- x\n.SH SYNOPSIS\n\\fBtdbc::connection\\fR \\fIx\\fR\n.SH DESCRIPTION\nThe \\fBscale\\fR of a column, see \\fBtext\\fR."
+    close $fh
+    set fh [open $dir/tdbc_connection.n]; set t [read $fh]; close $fh
+    set m [n2md::tip700::convert $t -file $dir/tdbc_connection.n]
+    file delete -force $dir
+    assert [expr {[string first "../Tk/" $m] < 0}] "kein Link nach ../Tk/"
+    test::assertContains $m "The **scale** of" "scale bleibt fett"
+}
+
 # ------------------------------------------------------------
 # Kommandozeile
 # ------------------------------------------------------------
